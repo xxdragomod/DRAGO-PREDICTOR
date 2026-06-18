@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Game — Drago Predictor</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700;800;900&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+@view-transition{navigation:auto}
+::view-transition-old(root){animation:vtOut .22s cubic-bezier(.4,0,.2,1) both}
+::view-transition-new(root){animation:vtIn .26s cubic-bezier(.22,1,.36,1) both}
+@keyframes vtOut{to{opacity:0;transform:translateY(-8px)}}
+@keyframes vtIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+body{
+  min-height:100vh;
+  background:linear-gradient(180deg,#c3caff 0%,#e2e5ff 40%,#ffffff 100%);
+  font-family:'Montserrat',sans-serif;
+  display:flex;flex-direction:column;align-items:center;
+  padding:20px 14px 110px;
+}
+
+/* ── Page enter animation ── */
+.page-wrap{width:100%;max-width:460px;display:flex;flex-direction:column;align-items:center;animation:fadeUp .4s ease both}
+@keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+
+/* ── Page header ── */
+.page-header{width:100%;display:flex;align-items:center;gap:10px;margin-bottom:18px}
+.back-btn{width:38px;height:38px;border-radius:50%;background:#fff;border:none;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.08);flex-shrink:0;transition:transform .15s}
+.back-btn:active{transform:scale(.93)}
+.back-btn i{font-size:16px;color:#7C3AED}
+.page-header h1{font-size:20px;font-weight:900;color:#1a1a2e}
+
+/* ── Section label ── */
+.section-label{width:100%;font-size:11px;font-weight:800;color:#9ca3af;text-transform:uppercase;letter-spacing:.7px;margin-bottom:10px}
+
+/* ── Game selector cards ── */
+.game-selector{width:100%;display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:22px}
+
+.game-card{
+  background:#fff;
+  border-radius:16px;
+  padding:8px 8px 8px;
+  display:flex;flex-direction:column;align-items:center;gap:6px;
+  border:2.5px solid #eef0ff;
+  cursor:pointer;
+  box-shadow:0 6px 18px rgba(0,0,0,.06);
+  transition:transform .22s cubic-bezier(.34,1.56,.64,1), border-color .18s, box-shadow .18s;
+  position:relative;
+  user-select:none;
+}
+.game-card:active{transform:scale(.95)}
+
+.game-card.selected{
+  border-color:#7C3AED;
+  box-shadow:0 8px 24px rgba(124,58,237,.22);
+  transform:scale(1.03);
+}
+
+.game-card img{
+  width:100%;
+  height:44px;
+  object-fit:contain;
+  object-position:center;
+  border-radius:10px;
+  transition:transform .3s ease;
+}
+.game-card.selected img{transform:scale(1.04)}
+
+.game-card-name{font-size:12px;font-weight:900;color:#1a1a2e;text-align:center;line-height:1.3}
+.game-card-sub{font-size:10px;font-weight:700;color:#9ca3af;text-align:center;margin-top:2px}
+
+/* ── Period selector ── */
+.period-section{width:100%;display:none;animation:fadeUp .3s ease both;margin-bottom:22px}
+.period-section.show{display:block}
+.period-box{
+  width:100%;
+  background:transparent;
+  display:flex;align-items:center;gap:10px;
+}
+.period-clock{
+  width:42px;height:42px;flex-shrink:0;object-fit:contain;
+  filter:drop-shadow(0 3px 6px rgba(0,0,0,.12));
+  animation:spinSlow 8s linear infinite;
+}
+@keyframes spinSlow{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+.period-heading{
+  font-size:21px;font-weight:900;color:#4b5563;
+  letter-spacing:.5px;text-transform:uppercase;
+  flex:1;white-space:nowrap;line-height:1;
+}
+.period-select-wrap{position:relative;flex-shrink:0}
+.period-select{
+  font-family:'Montserrat',sans-serif;
+  font-size:14px;font-weight:900;color:#fff;
+  text-transform:uppercase;letter-spacing:.5px;
+  padding:12px 40px 12px 22px;
+  border:none;border-radius:30px;
+  background:linear-gradient(135deg,#8E97E8,#7C5CFC);
+  cursor:pointer;outline:none;
+  appearance:none;-webkit-appearance:none;
+  box-shadow:0 6px 16px rgba(124,92,252,.35);
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23ffffff' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E"), linear-gradient(135deg,#8E97E8,#7C5CFC);
+  background-repeat:no-repeat;background-position:right 16px center, center;
+  transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .2s;
+}
+.period-select:active{transform:scale(.95)}
+.period-select option{color:#1a1a2e;background:#fff;font-weight:700}
+
+/* ── Game cards carousel (shown after game + period selected) ── */
+.results-section{width:100%;display:none;animation:fadeUp .3s ease both}
+.results-section.show{display:block}
+.results-scroll{
+  width:100%;
+  display:grid;
+  grid-auto-flow:column;
+  grid-template-rows:auto auto;
+  gap:18px 14px;
+  overflow-x:auto;
+  overflow-y:hidden;
+  padding:6px 2px 14px;
+  scroll-behavior:smooth;
+  -webkit-overflow-scrolling:touch;
+  scrollbar-width:none;
+  scroll-snap-type:x proximity;
+}
+.results-scroll::-webkit-scrollbar{display:none}
+.results-scroll.is-msg{display:block}
+
+/* Phone-frame game card */
+.result-card{
+  width:128px;
+  flex-shrink:0;
+  display:flex;flex-direction:column;align-items:center;gap:9px;
+  cursor:pointer;
+  scroll-snap-align:start;
+  transition:transform .2s cubic-bezier(.34,1.56,.64,1);
+}
+.result-card:active{transform:scale(.95)}
+.phone-frame{
+  width:128px;
+  aspect-ratio:9/18.5;
+  background:#111;
+  border-radius:24px;
+  padding:5px;
+  box-shadow:0 10px 22px rgba(0,0,0,.28);
+  position:relative;
+}
+.phone-frame::before{
+  content:'';position:absolute;top:9px;left:50%;transform:translateX(-50%);
+  width:40px;height:5px;border-radius:5px;background:#000;z-index:2;
+}
+.phone-screen{
+  width:100%;height:100%;border-radius:19px;overflow:hidden;background:#000;
+}
+.phone-screen img{width:100%;height:100%;object-fit:cover;display:block}
+.result-name{
+  font-size:13px;font-weight:900;color:#4b5563;
+  text-transform:uppercase;text-align:center;letter-spacing:.3px;
+  line-height:1.2;max-width:128px;
+}
+
+/* Empty state */
+.results-empty{
+  width:100%;text-align:center;padding:40px 20px;
+  font-size:13px;font-weight:700;color:#9ca3af;
+}
+.results-loading{
+  width:100%;display:flex;justify-content:center;padding:40px 0;
+}
+.results-loading .spinner{width:34px;height:34px}
+
+/* ── Navbar ── */
+.navbar{
+  background:rgba(255,255,255,0.75);
+  backdrop-filter:blur(14px);
+  -webkit-backdrop-filter:blur(14px);
+  width:100%;padding:12px 0;
+  display:flex;justify-content:space-around;align-items:center;
+  border-top:1px solid rgba(0,0,0,.05);
+  position:fixed;bottom:0;left:0;
+  transition:transform .4s ease;z-index:900;
+}
+.nav-item{display:flex;align-items:center;padding:7px 14px;border-radius:20px;text-decoration:none;color:#888;transition:all .25s ease}
+.nav-item i{font-size:18px}
+.nav-item span{margin-left:0;max-width:0;overflow:hidden;transition:.25s;white-space:nowrap;font-weight:800;font-size:13px}
+.nav-item.active{background-color:#7680F5;color:#fff}
+.nav-item.active span{margin-left:7px;max-width:100px}
+
+#expandBtn{
+  position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
+  background:linear-gradient(135deg,#7C5CFC,#5B6AF0);
+  color:#fff;padding:10px 18px;border-radius:50px;cursor:pointer;
+  display:none;box-shadow:0 4px 14px rgba(0,0,0,.18);z-index:1000;
+  font-weight:800;font-size:13px;letter-spacing:.4px;
+}
+
+/* ── Status overlays ── */
+.full-ov{display:none;position:fixed;inset:0;z-index:3000;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:30px;background:linear-gradient(180deg,#c3caff,#e2e5ff 40%,#fff)}
+.full-ov.show{display:flex}
+.ov-icon{font-size:54px;margin-bottom:14px}
+.ov-title{font-size:22px;font-weight:900;color:#1E293B;margin-bottom:10px}
+.ov-desc{font-size:14px;color:#6b7280;max-width:320px;line-height:1.6;margin-bottom:20px}
+.ov-link{display:inline-block;background:linear-gradient(135deg,#7C3AED,#5B6AF0);color:#fff;text-decoration:none;padding:12px 24px;border-radius:12px;font-weight:800;font-size:14px}
+
+#loadingOverlay{position:fixed;inset:0;background:linear-gradient(180deg,#c3caff,#e2e5ff 40%,#fff);display:flex;align-items:center;justify-content:center;z-index:999;transition:opacity .3s}
+.spinner{width:44px;height:44px;border:4px solid rgba(124,92,252,.2);border-top-color:#7C5CFC;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<div id="loadingOverlay"><div class="spinner"></div></div>
+
+<!-- Status overlays -->
+<div class="full-ov" id="ovBanned">
+  <div class="ov-icon">&#128683;</div>
+  <div class="ov-title">Account Banned</div>
+  <div class="ov-desc">Aapka account permanently ban kar diya gaya hai.</div>
+  <a href="https://t.me/xx_drago" target="_blank" class="ov-link">Contact Support</a>
+</div>
+<div class="full-ov" id="ovBlocked">
+  <div class="ov-icon">&#9940;</div>
+  <div class="ov-title">Account Blocked</div>
+  <div class="ov-desc">Aapka account block kar diya gaya hai. Support se contact karo.</div>
+  <a href="https://t.me/xx_drago" target="_blank" class="ov-link">Contact Support</a>
+</div>
+<div class="full-ov" id="ovPaused">
+  <div class="ov-icon">&#9208;</div>
+  <div class="ov-title">Account Paused</div>
+  <div class="ov-desc">Aapka account temporarily pause hai.</div>
+  <a href="https://t.me/xx_drago" target="_blank" class="ov-link">Contact Support</a>
+</div>
+<div class="full-ov" id="ovExpired">
+  <div class="ov-icon">&#9203;</div>
+  <div class="ov-title">Subscription Expired</div>
+  <div class="ov-desc">Aapka plan expire ho gaya hai. Naya plan lo.</div>
+  <a href="/payment" class="ov-link">Select Plan</a>
+</div>
+
+<!-- ── Main content ── -->
+<div class="page-wrap">
+
+  <!-- Page header -->
+  <div class="page-header">
+    <button class="back-btn" onclick="history.back()"><i class="fa-solid fa-arrow-left"></i></button>
+    <h1>Game Predictor</h1>
+  </div>
+
+  <!-- Game type selector -->
+  <div class="section-label">Select Game Type</div>
+  <div class="game-selector">
+
+    <!-- TRX WINGO -->
+    <div class="game-card" id="cardTrx" onclick="selectGame('trx')">
+      <img src="https://i.ibb.co/bMkZBMtK/5d05fc9c7ab0d4d5abc04c08877d2b20.jpg" alt="TRX Wingo">
+      <div>
+        <div class="game-card-name">TRX WINGO</div>
+        <div class="game-card-sub">TRX Prediction</div>
+      </div>
+    </div>
+
+    <!-- WINGO -->
+    <div class="game-card" id="cardWingo" onclick="selectGame('wingo')">
+      <img src="https://i.ibb.co/gLF7jBnd/7b31396ccc2c501cbb52b224476b3fdf.jpg" alt="Wingo">
+      <div>
+        <div class="game-card-name">WINGO</div>
+        <div class="game-card-sub">Color Prediction</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Period selector — shown after game type selected -->
+  <div class="period-section" id="periodSection">
+    <div class="period-box">
+      <img src="/images/clock.webp" alt="Clock" class="period-clock">
+      <span class="period-heading">Game Select</span>
+      <div class="period-select-wrap">
+        <select class="period-select" id="periodSelect" onchange="selectPeriod(this.value)">
+          <option value="" disabled selected>Select</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- Game cards carousel — shown after game + period both selected -->
+  <div class="results-section" id="resultsSection">
+    <div class="results-scroll" id="resultsScroll"></div>
+  </div>
+
+</div><!-- /page-wrap -->
+
+<!-- Expand button -->
+<div id="expandBtn">&#10022; SHOW &#10022;</div>
+
+<!-- Navbar -->
+<nav class="navbar" id="navbar">
+  <a href="/home"    class="nav-item"><i class="fa-solid fa-house"></i><span>Home</span></a>
+  <a href="/game"    class="nav-item active"><i class="fa-solid fa-gamepad"></i><span>Game</span></a>
+  <a href="/payment" class="nav-item"><i class="fa-solid fa-calendar-check"></i><span>Plan</span></a>
+  <a href="/profile" class="nav-item"><i class="fa-regular fa-user"></i><span>Profile</span></a>
+</nav>
+
+<script>
+const API = "https://flask-hello-world-nu-sooty-63.vercel.app";
+let pollTmr = null;
+let selectedGame = null;
+
+// ── Auth helpers ──
+function ud(){ try{ return JSON.parse(localStorage.getItem("_ud")||"null"); }catch(e){ return null; } }
+function auth(){
+  const u = ud();
+  if(!u||!u.uid||!u.session_signature) return null;
+  return { uid: u.uid, session_signature: u.session_signature };
+}
+function goLogin(){ localStorage.removeItem("_ud"); window.location.replace("/"); }
+
+async function api(path, body){
+  const r = await fetch(API+path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok){ const e=new Error(d.detail||"Error "+r.status); e.status=r.status; e.detail=d.detail||""; throw e; }
+  return d;
+}
+async function withRefresh(cb){
+  try{ return await cb(); }
+  catch(e){
+    if(e.status===403 && e.detail==="session_expired"){
+      const a = auth(); if(!a){ goLogin(); return; }
+      try{
+        const d = await api("/api/refresh-session", a);
+        if(d.session_signature){ const u=ud(); u.session_signature=d.session_signature; localStorage.setItem("_ud",JSON.stringify(u)); }
+        return await cb();
+      }catch(e2){ if(e2.status===403){ goLogin(); return; } throw e2; }
+    }
+    throw e;
+  }
+}
+
+// ── Status handling ──
+function hideOvs(){ ["ovBanned","ovBlocked","ovPaused","ovExpired"].forEach(id=>document.getElementById(id).classList.remove("show")); }
+function handleStatus(as, ss){
+  if(as==="banned") { stopPoll(); hideOvs(); document.getElementById("ovBanned").classList.add("show");  return false; }
+  if(as==="blocked"){ stopPoll(); hideOvs(); document.getElementById("ovBlocked").classList.add("show"); return false; }
+  if(as==="paused") { stopPoll(); hideOvs(); document.getElementById("ovPaused").classList.add("show");  return false; }
+  if(ss!=="active") { stopPoll(); hideOvs(); document.getElementById("ovExpired").classList.add("show"); return false; }
+  hideOvs(); return true;
+}
+
+function startPoll(){ if(pollTmr) return; pollTmr = setInterval(doPoll, 15000); }
+function stopPoll(){ if(pollTmr){ clearInterval(pollTmr); pollTmr=null; } }
+async function doPoll(){
+  const a = auth(); if(!a) return;
+  try{
+    const d = await withRefresh(()=>api("/api/account-status", a));
+    handleStatus(d.account_status, d.subscription_status);
+  }catch(e){}
+}
+
+// Period options per game
+const PERIODS = {
+  trx:   ["1 Min"],
+  wingo: ["30 Sec", "1 Min"],
+};
+
+let selectedPeriod = null;
+
+// Map UI period label → DB period code
+function periodCode(label){
+  if(label === "30 Sec") return "30s";
+  if(label === "1 Min")  return "1min";
+  return "";
+}
+
+const gamesCache = {};   // cache by period code
+let loadReq = 0;         // guard against race conditions
+
+function maybeShowResults(){
+  const sec = document.getElementById("resultsSection");
+  if(selectedGame && selectedPeriod){
+    sec.classList.add("show");
+    loadGames();
+  } else {
+    sec.classList.remove("show");
+  }
+}
+
+async function loadGames(){
+  const scroll = document.getElementById("resultsScroll");
+  const code = periodCode(selectedPeriod);
+  const reqId = ++loadReq;
+
+  // Loading state
+  scroll.classList.add("is-msg");
+  scroll.innerHTML = '<div class="results-loading"><div class="spinner"></div></div>';
+
+  try{
+    let list;
+    if(gamesCache[code]){
+      list = gamesCache[code];
+    } else {
+      const r = await fetch("/api/games?period=" + encodeURIComponent(code));
+      const d = await r.json().catch(()=>({}));
+      list = Array.isArray(d.games) ? d.games : [];
+      gamesCache[code] = list;
+    }
+    if(reqId !== loadReq) return; // a newer request superseded this one
+    renderGames(list);
+  }catch(e){
+    if(reqId !== loadReq) return;
+    renderGames([]);
+  }
+}
+
+function renderGames(list){
+  const scroll = document.getElementById("resultsScroll");
+  if(!list.length){
+    scroll.classList.add("is-msg");
+    scroll.innerHTML = '<div class="results-empty">No games available yet.</div>';
+    return;
+  }
+  scroll.classList.remove("is-msg");
+  scroll.innerHTML = "";
+  list.forEach(g=>{
+    const card = document.createElement("div");
+    card.className = "result-card";
+    card.onclick = ()=>{
+      if(g.link){ window.open(g.link, "_blank"); }
+      else if(g.slug){ window.location.href = "/game/" + g.slug; }
+    };
+    const img = document.createElement("img");
+    img.src = g.image; img.alt = g.name; img.loading = "lazy";
+    const screen = document.createElement("div"); screen.className = "phone-screen"; screen.appendChild(img);
+    const frame = document.createElement("div"); frame.className = "phone-frame"; frame.appendChild(screen);
+    const name = document.createElement("div"); name.className = "result-name"; name.textContent = g.name;
+    card.appendChild(frame); card.appendChild(name);
+    scroll.appendChild(card);
+  });
+}
+
+window.selectGame = function(type){
+  selectedGame = type;
+  selectedPeriod = null;
+
+  // Toggle card selection
+  document.getElementById("cardTrx").classList.toggle("selected",   type === "trx");
+  document.getElementById("cardWingo").classList.toggle("selected", type === "wingo");
+
+  // Populate dropdown
+  const options = PERIODS[type] || [];
+  const sel = document.getElementById("periodSelect");
+  sel.innerHTML = "";
+  options.forEach((p, i) => {
+    const opt = document.createElement("option");
+    opt.value = p;
+    opt.textContent = p;
+    sel.appendChild(opt);
+    if (i === 0) { sel.value = p; selectedPeriod = p; }
+  });
+
+  // Show period section
+  const sec = document.getElementById("periodSection");
+  sec.classList.add("show");
+  setTimeout(() => sec.scrollIntoView({behavior:"smooth", block:"nearest"}), 80);
+
+  maybeShowResults();
+};
+
+window.selectPeriod = function(period){
+  selectedPeriod = period;
+  maybeShowResults();
+};
+
+// ── Init ──
+async function init(){
+  const a = auth(); if(!a){ goLogin(); return; }
+  try{
+    const d = await withRefresh(()=>api("/api/account-status", a));
+    if(!handleStatus(d.account_status||"active", d.subscription_status||"none")){ hideLoader(); return; }
+    startPoll();
+  }catch(e){
+    startPoll();
+  }
+  hideLoader();
+}
+function hideLoader(){ const l=document.getElementById("loadingOverlay"); l.style.opacity="0"; setTimeout(()=>l.style.display="none",300); }
+
+// ── Navbar auto-hide ──
+(function(){
+  const navbar    = document.getElementById("navbar");
+  const expandBtn = document.getElementById("expandBtn");
+  const items     = document.querySelectorAll(".nav-item");
+  let timer;
+  function startTimer(){
+    clearTimeout(timer);
+    timer = setTimeout(()=>{
+      navbar.style.transform = "translateY(100%)";
+      setTimeout(()=>{ navbar.style.display="none"; expandBtn.style.display="block"; }, 400);
+    }, 5000);
+  }
+  expandBtn.addEventListener("click",()=>{
+    navbar.style.display = "flex";
+    setTimeout(()=>{ navbar.style.transform="translateY(0)"; }, 10);
+    expandBtn.style.display = "none";
+    startTimer();
+  });
+  items.forEach(item=>item.addEventListener("click", startTimer));
+  window.addEventListener("touchstart", startTimer, {passive:true});
+  startTimer();
+})();
+
+init();
+</script>
+</body>
+</html>
