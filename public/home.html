@@ -204,7 +204,7 @@ function handleStatus(as, ss){
   if(as==="banned") { stopPoll(); hideOvs(); document.getElementById("ovBanned").classList.add("show");  return false; }
   if(as==="blocked"){ stopPoll(); hideOvs(); document.getElementById("ovBlocked").classList.add("show"); return false; }
   if(as==="paused") { stopPoll(); hideOvs(); document.getElementById("ovPaused").classList.add("show");  return false; }
-  if(ss!=="active") { stopPoll(); hideOvs(); document.getElementById("ovExpired").classList.add("show"); return false; }
+  if(ss!=="active" && ss!=="free") { stopPoll(); hideOvs(); document.getElementById("ovExpired").classList.add("show"); return false; }
   hideOvs(); return true;
 }
 
