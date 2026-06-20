@@ -44,29 +44,37 @@ body{
 .qcard h3{font-size:15px;font-weight:800;color:#1a1a2e;margin-bottom:4px}
 .qcard span{font-size:11px;color:#6b7280;font-weight:600}
 
-/* Navbar (glassmorphism) */
+/* Navbar — floating pill (consistent with all pages) */
 .navbar{
-  background:rgba(255,255,255,0.7);
-  backdrop-filter:blur(15px);
-  -webkit-backdrop-filter:blur(15px);
-  width:100%;padding:15px 0;
+  background:rgba(255,255,255,0.88);
+  backdrop-filter:blur(18px);
+  -webkit-backdrop-filter:blur(18px);
+  width:calc(100% - 28px);
+  max-width:432px;
+  border-radius:28px;
+  padding:10px 6px;
   display:flex;justify-content:space-around;align-items:center;
-  border-top:1px solid rgba(0,0,0,0.05);
-  position:fixed;bottom:0;left:0;
-  transition:transform 0.5s ease;z-index:900;
+  box-shadow:0 8px 28px rgba(100,80,220,.14);
+  border:1.5px solid rgba(255,255,255,0.9);
+  position:fixed;bottom:14px;
+  left:50%;transform:translateX(-50%);
+  transition:opacity .4s ease,transform .4s ease;
+  z-index:900;
 }
-.nav-item{display:flex;align-items:center;padding:8px 15px;border-radius:20px;text-decoration:none;color:#888;transition:all 0.3s ease}
-.nav-item i{font-size:20px}
-.nav-item span{margin-left:0;max-width:0;overflow:hidden;transition:0.3s;white-space:nowrap;font-weight:bold;font-size:14px}
+.navbar.hidden{opacity:0;transform:translateX(-50%) translateY(20px);pointer-events:none}
+.nav-item{display:flex;align-items:center;padding:8px 14px;border-radius:20px;text-decoration:none;color:#888;transition:all .25s cubic-bezier(.34,1.56,.64,1);-webkit-tap-highlight-color:transparent}
+.nav-item i{font-size:18px}
+.nav-item span{margin-left:0;max-width:0;overflow:hidden;transition:.25s;white-space:nowrap;font-weight:800;font-size:13px}
 .nav-item.active{background-color:#7680F5;color:#fff}
-.nav-item.active span{margin-left:8px;max-width:100px}
+.nav-item.active span{margin-left:7px;max-width:100px}
 
 #expandBtn{
-  position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+  position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
   background:linear-gradient(135deg,#7C5CFC,#5B6AF0);
-  color:#fff;padding:12px 20px;border-radius:50px;cursor:pointer;
-  display:none;box-shadow:0 5px 15px rgba(0,0,0,0.2);z-index:1000;
-  font-weight:800;font-size:14px;letter-spacing:.5px;
+  color:#fff;padding:10px 22px;border-radius:50px;cursor:pointer;
+  display:none;box-shadow:0 6px 18px rgba(124,92,252,.35);z-index:1000;
+  font-weight:800;font-size:13px;letter-spacing:.4px;
+  -webkit-tap-highlight-color:transparent;
 }
 
 /* Status overlay */
@@ -262,13 +270,13 @@ document.getElementById("navGame").addEventListener("click",()=>window.location.
   function startTimer(){
     clearTimeout(timer);
     timer=setTimeout(()=>{
-      navbar.style.transform='translateY(100%)';
-      setTimeout(()=>{ navbar.style.display='none'; expandBtn.style.display='block'; },500);
+      navbar.classList.add('hidden');
+      setTimeout(()=>{ navbar.style.display='none'; expandBtn.style.display='block'; },400);
     },10000);
   }
   expandBtn.addEventListener('click',()=>{
     navbar.style.display='flex';
-    setTimeout(()=>{ navbar.style.transform='translateY(0)'; },10);
+    setTimeout(()=>navbar.classList.remove('hidden'), 10);
     expandBtn.style.display='none';
     startTimer();
   });
