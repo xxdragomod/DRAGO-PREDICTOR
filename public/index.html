@@ -269,9 +269,10 @@ function checkAutoLogin() {
   const s = loadSession();
   if (!s) return false;
   if (s.d !== dfp()) { clearSession(); return false; }
-  // Check if user has active subscription stored locally
+  // Check if user has active/free subscription stored locally
   const u = (() => { try{ return JSON.parse(localStorage.getItem("_ud")||"null"); }catch(e){ return null; } })();
-  if (u && u.subscription_status === "active") {
+  const ss = u && u.subscription_status;
+  if (ss === "active" || ss === "free") {
     window.location.replace("/home");
   } else {
     window.location.replace("/telegram-verify");

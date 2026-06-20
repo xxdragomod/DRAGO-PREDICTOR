@@ -25,38 +25,23 @@ body{
 .page-wrap{width:100%;max-width:460px;display:flex;flex-direction:column;align-items:center;animation:fadeUp .4s ease both}
 @keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
 
-/* ── Hero section ── */
-.hero-section{
+/* ── Page header ── */
+.page-header{
   width:100%;
-  background:rgba(255,255,255,0.65);
+  display:flex;align-items:center;gap:12px;
+  margin-bottom:22px;
+  padding:14px 16px;
+  background:rgba(255,255,255,0.7);
   backdrop-filter:blur(12px);
   -webkit-backdrop-filter:blur(12px);
   border-radius:20px;
-  padding:14px 16px;
-  display:flex;
-  align-items:center;
-  gap:12px;
-  margin-bottom:20px;
-  box-shadow:0 6px 20px rgba(124,92,252,.10);
-  border:1.5px solid rgba(255,255,255,0.8);
+  box-shadow:0 4px 16px rgba(124,92,252,.08);
+  border:1.5px solid rgba(255,255,255,0.85);
 }
-.hero-back-btn{
-  width:40px;height:40px;flex-shrink:0;
-  border-radius:50%;background:#fff;border:none;
-  display:flex;align-items:center;justify-content:center;
-  cursor:pointer;
-  box-shadow:0 3px 10px rgba(124,92,252,.15);
-  transition:transform .15s,box-shadow .15s;
-}
-.hero-back-btn:active{transform:scale(.90)}
-.hero-back-btn i{font-size:16px;color:#7C3AED}
-.hero-info{display:flex;flex-direction:column;gap:2px;flex:1}
-.hero-title{font-size:18px;font-weight:900;color:#1a1a2e;letter-spacing:.2px}
-.hero-sub{font-size:11px;font-weight:700;color:#7C5CFC;text-transform:uppercase;letter-spacing:.5px}
-.hero-logo{width:42px;height:42px;border-radius:12px;object-fit:contain;flex-shrink:0;box-shadow:0 4px 10px rgba(0,0,0,.08)}
-
-/* ── Page header (keep for backwards compat, now hidden) ── */
-.page-header{display:none}
+.page-header-logo{width:40px;height:40px;border-radius:12px;object-fit:contain;flex-shrink:0;box-shadow:0 3px 8px rgba(0,0,0,.08)}
+.page-header-info{display:flex;flex-direction:column;gap:2px;flex:1}
+.page-header-title{font-size:18px;font-weight:900;color:#1a1a2e;letter-spacing:.2px}
+.page-header-sub{font-size:11px;font-weight:700;color:#7C5CFC;text-transform:uppercase;letter-spacing:.5px}
 
 /* ── Section label ── */
 .section-label{width:100%;font-size:11px;font-weight:800;color:#9ca3af;text-transform:uppercase;letter-spacing:.7px;margin-bottom:10px}
@@ -264,21 +249,13 @@ body{
 <!-- ── Main content ── -->
 <div class="page-wrap">
 
-  <!-- Hero section -->
-  <div class="hero-section">
-    <button class="hero-back-btn" onclick="window.location.href='/home'" aria-label="Back to Home">
-      <i class="fa-solid fa-arrow-left"></i>
-    </button>
-    <div class="hero-info">
-      <span class="hero-title">Game Predictor</span>
-      <span class="hero-sub">Select game &amp; period</span>
-    </div>
-    <img src="https://i.ibb.co/Cp6rPPxp/20260218-115056.png" alt="Drago" class="hero-logo">
-  </div>
-
-  <!-- Page header (hidden, kept for structure) -->
+  <!-- Page header -->
   <div class="page-header">
-    <h1>Game Predictor</h1>
+    <img src="https://i.ibb.co/Cp6rPPxp/20260218-115056.png" alt="Drago" class="page-header-logo">
+    <div class="page-header-info">
+      <span class="page-header-title">Game Predictor</span>
+      <span class="page-header-sub">Select game &amp; period</span>
+    </div>
   </div>
 
   <!-- Game type selector -->
@@ -459,8 +436,10 @@ function renderGames(list){
     const card = document.createElement("div");
     card.className = "result-card";
     card.onclick = ()=>{
-      if(g.link){ window.open(g.link, "_blank"); }
-      else if(g.slug){ window.open("/game/" + g.slug, "_blank"); }
+      const dest = g.link || (g.slug ? "/game/"+g.slug : null);
+      if(!dest) return;
+      const params = new URLSearchParams({ name: g.name || "", link: dest });
+      window.location.href = "/game-link?" + params.toString();
     };
     const img = document.createElement("img");
     img.src = g.image; img.alt = g.name; img.loading = "lazy";

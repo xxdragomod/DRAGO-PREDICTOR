@@ -161,7 +161,12 @@ function auth(){
 }
 function esc(s){ return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
 function goLogin(){ localStorage.removeItem("_ud"); window.location.replace("/"); }
-function goPayment(){ window.location.replace("/payment"); }
+function goPayment(){
+  // If user already has active/free plan, skip payment and go home
+  const u=ud(); const ss=u&&u.subscription_status;
+  if(ss==="active"||ss==="free"){ window.location.replace("/home"); return; }
+  window.location.replace("/payment");
+}
 
 async function api(path, body){
   const r=await fetch(API+path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
