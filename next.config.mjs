@@ -15,6 +15,7 @@ const nextConfig = {
       { source: "/payment", destination: "/payment.html" },
       { source: "/profile", destination: "/profile.html" },
       { source: "/telegram-verify", destination: "/telegram-verify.html" },
+      { source: "/game-link", destination: "/game-link.html" },
     ]
   },
 }

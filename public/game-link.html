@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Game — Drago Predictor</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700;800;900&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+@view-transition{navigation:auto}
+::view-transition-old(root){animation:vtOut .22s cubic-bezier(.4,0,.2,1) both}
+::view-transition-new(root){animation:vtIn .26s cubic-bezier(.22,1,.36,1) both}
+@keyframes vtOut{to{opacity:0;transform:translateX(8px)}}
+@keyframes vtIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:translateX(0)}}
+
+body{
+  min-height:100vh;
+  background:linear-gradient(180deg,#c3caff 0%,#e2e5ff 40%,#ffffff 100%);
+  font-family:'Montserrat',sans-serif;
+  display:flex;flex-direction:column;align-items:center;
+  padding:20px 14px 40px;
+  overflow-x:hidden;
+}
+
+/* ── Page enter animation ── */
+.page-wrap{
+  width:100%;max-width:460px;
+  display:flex;flex-direction:column;align-items:center;
+  animation:fadeSlideIn .38s cubic-bezier(.22,1,.36,1) both;
+}
+@keyframes fadeSlideIn{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}
+
+/* ── Hero section ── */
+.hero-section{
+  width:100%;
+  background:rgba(255,255,255,0.72);
+  backdrop-filter:blur(14px);
+  -webkit-backdrop-filter:blur(14px);
+  border-radius:22px;
+  padding:14px 16px;
+  display:flex;
+  align-items:center;
+  gap:12px;
+  margin-bottom:22px;
+  box-shadow:0 8px 24px rgba(124,92,252,.12);
+  border:1.5px solid rgba(255,255,255,0.9);
+  animation:fadeSlideIn .38s .05s cubic-bezier(.22,1,.36,1) both;
+}
+.hero-back-btn{
+  width:42px;height:42px;flex-shrink:0;
+  border-radius:50%;
+  background:linear-gradient(135deg,#f3f0ff,#ede9fe);
+  border:none;
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;
+  box-shadow:0 3px 10px rgba(124,92,252,.18);
+  transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .18s;
+  -webkit-tap-highlight-color:transparent;
+}
+.hero-back-btn:active{transform:scale(.88)}
+.hero-back-btn i{font-size:16px;color:#7C3AED}
+.hero-info{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+.hero-title{
+  font-size:18px;font-weight:900;color:#1a1a2e;
+  letter-spacing:.2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.hero-sub{font-size:11px;font-weight:700;color:#7C5CFC;text-transform:uppercase;letter-spacing:.5px}
+.hero-logo{
+  width:42px;height:42px;border-radius:12px;
+  object-fit:contain;flex-shrink:0;
+  box-shadow:0 4px 10px rgba(0,0,0,.08);
+}
+
+/* ── Game card ── */
+.game-card{
+  width:100%;
+  background:rgba(255,255,255,0.82);
+  backdrop-filter:blur(10px);
+  -webkit-backdrop-filter:blur(10px);
+  border-radius:24px;
+  overflow:hidden;
+  box-shadow:0 10px 32px rgba(124,92,252,.14);
+  border:1.5px solid rgba(255,255,255,0.9);
+  margin-bottom:22px;
+  animation:fadeSlideIn .42s .1s cubic-bezier(.22,1,.36,1) both;
+}
+.game-card-img{
+  width:100%;aspect-ratio:16/9;
+  object-fit:cover;display:block;
+  background:#e8eaff;
+}
+.game-card-img.portrait{aspect-ratio:9/16;max-height:60vh;width:auto;margin:0 auto;display:block}
+.game-card-body{padding:18px 20px 20px}
+.game-card-name{
+  font-size:22px;font-weight:900;color:#1a1a2e;
+  letter-spacing:.3px;margin-bottom:6px;
+}
+.game-card-badge{
+  display:inline-flex;align-items:center;gap:5px;
+  background:linear-gradient(135deg,#f3f0ff,#ede9fe);
+  color:#7C3AED;font-size:11px;font-weight:800;
+  padding:4px 10px;border-radius:20px;
+  text-transform:uppercase;letter-spacing:.4px;
+  margin-bottom:16px;
+}
+
+/* ── Open button ── */
+.open-btn{
+  width:100%;
+  padding:16px;
+  border:none;border-radius:16px;
+  background:linear-gradient(135deg,#7C5CFC,#5B6AF0);
+  color:#fff;
+  font-family:'Montserrat',sans-serif;
+  font-size:16px;font-weight:900;
+  letter-spacing:.4px;
+  cursor:pointer;
+  box-shadow:0 8px 24px rgba(124,92,252,.38);
+  display:flex;align-items:center;justify-content:center;gap:10px;
+  transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .18s;
+  -webkit-tap-highlight-color:transparent;
+  animation:fadeSlideIn .46s .15s cubic-bezier(.22,1,.36,1) both;
+}
+.open-btn:active{transform:scale(.96);box-shadow:0 4px 14px rgba(124,92,252,.28)}
+.open-btn i{font-size:18px}
+
+/* ── Note ── */
+.note{
+  font-size:11.5px;font-weight:700;color:#9ca3af;
+  text-align:center;margin-top:14px;line-height:1.6;
+  animation:fadeSlideIn .5s .2s cubic-bezier(.22,1,.36,1) both;
+}
+
+/* ── Loading ── */
+#loadingOverlay{
+  position:fixed;inset:0;
+  background:linear-gradient(180deg,#c3caff,#e2e5ff 40%,#fff);
+  display:flex;align-items:center;justify-content:center;
+  z-index:999;transition:opacity .3s;
+}
+.spinner{
+  width:44px;height:44px;
+  border:4px solid rgba(124,92,252,.2);
+  border-top-color:#7C5CFC;
+  border-radius:50%;animation:spin .8s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── Status overlays ── */
+.full-ov{display:none;position:fixed;inset:0;z-index:3000;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:30px;background:linear-gradient(180deg,#c3caff,#e2e5ff 40%,#fff)}
+.full-ov.show{display:flex}
+.ov-icon{font-size:54px;margin-bottom:14px}
+.ov-title{font-size:22px;font-weight:900;color:#1E293B;margin-bottom:10px}
+.ov-desc{font-size:14px;color:#6b7280;max-width:320px;line-height:1.6;margin-bottom:20px}
+.ov-link{display:inline-block;background:linear-gradient(135deg,#7C3AED,#5B6AF0);color:#fff;text-decoration:none;padding:12px 24px;border-radius:12px;font-weight:800;font-size:14px}
+</style>
+</head>
+<body>
+
+<div id="loadingOverlay"><div class="spinner"></div></div>
+
+<!-- Status overlays -->
+<div class="full-ov" id="ovBanned">
+  <div class="ov-icon">&#128683;</div>
+  <div class="ov-title">Account Banned</div>
+  <div class="ov-desc">Aapka account permanently ban kar diya gaya hai.</div>
+  <a href="https://t.me/xx_drago" target="_blank" class="ov-link">Contact Support</a>
+</div>
+<div class="full-ov" id="ovBlocked">
+  <div class="ov-icon">&#9940;</div>
+  <div class="ov-title">Account Blocked</div>
+  <div class="ov-desc">Aapka account block kar diya gaya hai. Support se contact karo.</div>
+  <a href="https://t.me/xx_drago" target="_blank" class="ov-link">Contact Support</a>
+</div>
+<div class="full-ov" id="ovPaused">
+  <div class="ov-icon">&#9208;</div>
+  <div class="ov-title">Account Paused</div>
+  <div class="ov-desc">Aapka account temporarily pause hai.</div>
+  <a href="https://t.me/xx_drago" target="_blank" class="ov-link">Contact Support</a>
+</div>
+<div class="full-ov" id="ovExpired">
+  <div class="ov-icon">&#9203;</div>
+  <div class="ov-title">Subscription Expired</div>
+  <div class="ov-desc">Aapka plan expire ho gaya hai. Naya plan lo.</div>
+  <a href="/payment" class="ov-link">Select Plan</a>
+</div>
+<div class="full-ov" id="ovNoLink">
+  <div class="ov-icon">&#128279;</div>
+  <div class="ov-title">Link Not Found</div>
+  <div class="ov-desc">Is game ka link available nahi hai. Game page par wapas jao.</div>
+  <a href="/game" class="ov-link">Back to Games</a>
+</div>
+
+<!-- Main -->
+<div class="page-wrap">
+
+  <!-- Hero section with back button -->
+  <div class="hero-section">
+    <button class="hero-back-btn" id="backBtn" aria-label="Back to Games">
+      <i class="fa-solid fa-arrow-left"></i>
+    </button>
+    <div class="hero-info">
+      <span class="hero-title" id="heroTitle">Game</span>
+      <span class="hero-sub">Game Predictor</span>
+    </div>
+    <img src="https://i.ibb.co/Cp6rPPxp/20260218-115056.png" alt="Drago" class="hero-logo">
+  </div>
+
+  <!-- Game info card -->
+  <div class="game-card" id="gameCard" style="display:none">
+    <div class="game-card-body">
+      <div class="game-card-name" id="cardName">Game</div>
+      <div class="game-card-badge"><i class="fa-solid fa-circle-dot"></i> Live Prediction</div>
+      <button class="open-btn" id="openBtn">
+        <i class="fa-solid fa-arrow-up-right-from-square"></i>
+        Open Game
+      </button>
+    </div>
+  </div>
+
+  <div class="note">Yeh link ek naye tab me khulega. Wapas aane ke liye back button dabao.</div>
+
+</div>
+
+<script>
+const API = "https://flask-hello-world-nu-sooty-63.vercel.app";
+let pollTmr = null;
+
+function ud(){ try{ return JSON.parse(localStorage.getItem("_ud")||"null"); }catch(e){ return null; } }
+function auth(){
+  const u=ud(); if(!u||!u.uid||!u.session_signature) return null;
+  return {uid:u.uid,session_signature:u.session_signature};
+}
+function goLogin(){ localStorage.removeItem("_ud"); window.location.replace("/"); }
+
+async function api(path,body){
+  const r=await fetch(API+path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){ const e=new Error(d.detail||"Error "+r.status); e.status=r.status; e.detail=d.detail||""; throw e; }
+  return d;
+}
+async function withRefresh(cb){
+  try{ return await cb(); }
+  catch(e){
+    if(e.status===403 && e.detail==="session_expired"){
+      const a=auth(); if(!a){ goLogin(); return; }
+      try{
+        const d=await api("/api/refresh-session",a);
+        if(d.session_signature){ const u=ud(); u.session_signature=d.session_signature; localStorage.setItem("_ud",JSON.stringify(u)); }
+        return await cb();
+      }catch(e2){ if(e2.status===403){ goLogin(); return; } throw e2; }
+    }
+    throw e;
+  }
+}
+
+function hideOvs(){ ["ovBanned","ovBlocked","ovPaused","ovExpired","ovNoLink"].forEach(id=>document.getElementById(id).classList.remove("show")); }
+function handleStatus(as,ss){
+  if(as==="banned") { stopPoll(); hideOvs(); document.getElementById("ovBanned").classList.add("show");  return false; }
+  if(as==="blocked"){ stopPoll(); hideOvs(); document.getElementById("ovBlocked").classList.add("show"); return false; }
+  if(as==="paused") { stopPoll(); hideOvs(); document.getElementById("ovPaused").classList.add("show");  return false; }
+  if(ss!=="active"&&ss!=="free"){ stopPoll(); hideOvs(); document.getElementById("ovExpired").classList.add("show"); return false; }
+  hideOvs(); return true;
+}
+
+function startPoll(){ if(pollTmr) return; pollTmr=setInterval(doPoll,15000); }
+function stopPoll(){ if(pollTmr){ clearInterval(pollTmr); pollTmr=null; } }
+async function doPoll(){
+  const a=auth(); if(!a) return;
+  try{
+    const d=await withRefresh(()=>api("/api/account-status",a));
+    handleStatus(d.account_status,d.subscription_status);
+  }catch(e){}
+}
+
+function hideLoader(){ const l=document.getElementById("loadingOverlay"); l.style.opacity="0"; setTimeout(()=>l.style.display="none",300); }
+
+async function init(){
+  const a=auth(); if(!a){ goLogin(); return; }
+
+  // Read name + link from URL params
+  const params=new URLSearchParams(window.location.search);
+  const gameName=params.get("name")||"Game";
+  const gameLink=params.get("link")||"";
+
+  // Update hero title
+  document.getElementById("heroTitle").textContent=gameName;
+  document.getElementById("cardName").textContent=gameName;
+
+  // Back button → game page
+  document.getElementById("backBtn").addEventListener("click",()=>{
+    window.history.length>1 ? window.history.back() : window.location.href="/game";
+  });
+
+  if(!gameLink){
+    hideLoader();
+    document.getElementById("ovNoLink").classList.add("show");
+    return;
+  }
+
+  // Auth check
+  try{
+    const d=await withRefresh(()=>api("/api/account-status",a));
+    if(!handleStatus(d.account_status||"active",d.subscription_status||"none")){ hideLoader(); return; }
+    startPoll();
+  }catch(e){
+    startPoll();
+  }
+
+  // Show card + wire open button
+  document.getElementById("gameCard").style.display="block";
+  document.getElementById("openBtn").addEventListener("click",()=>{
+    window.open(gameLink,"_blank","noopener,noreferrer");
+  });
+
+  hideLoader();
+}
+
+init();
+</script>
+</body>
+</html>
