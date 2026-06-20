@@ -269,8 +269,14 @@ function checkAutoLogin() {
   const s = loadSession();
   if (!s) return false;
   if (s.d !== dfp()) { clearSession(); return false; }
-      window.location.replace("/telegram-verify");
-      return true;
+  // Check if user has active subscription stored locally
+  const u = (() => { try{ return JSON.parse(localStorage.getItem("_ud")||"null"); }catch(e){ return null; } })();
+  if (u && u.subscription_status === "active") {
+    window.location.replace("/home");
+  } else {
+    window.location.replace("/telegram-verify");
+  }
+  return true;
 }
 
 // ── Google OAuth ──
@@ -362,17 +368,18 @@ async function handleLogin(accessToken) {
       saveSession(u, devId);
       try {
         localStorage.setItem("_ud", JSON.stringify({
-          uid:               u.uid || "",
-          name:              u.name || "",
-          picture:           u.picture || "",
-          session_signature: data.session_signature || "",
+          uid:                 u.uid || "",
+          name:                u.name || "",
+          picture:             u.picture || "",
+          session_signature:   data.session_signature || "",
+          subscription_status: u.subscription_status || "none",
         }));
       } catch(e){}
 
       // Route: subscribed -> home, else Telegram verification gate -> payment.
       // If admin has turned Telegram verification OFF, skip the gate entirely.
       const tgGateOn = data.telegram_verification_enabled !== false;
-      if (u.subscription_status === "active") {
+      if (u.subscription_status === "active" || u.subscription_status === "free") {
         window.location.replace("/home");
       } else if (!tgGateOn || u.telegram_verified === true) {
         window.location.replace("/payment");

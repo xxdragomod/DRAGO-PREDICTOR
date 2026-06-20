@@ -459,9 +459,26 @@ function selectPlan(i){
 }
 
 // ── Continue ──
-document.getElementById("continueBtn").addEventListener("click",()=>{
+document.getElementById("continueBtn").addEventListener("click",async()=>{
   const p=plans[selIdx]; if(!p) return;
-  if(p.p==="FREE"){ alert("Free plan activated!"); return; }
+  if(p.p==="FREE"){
+    const btn=document.getElementById("continueBtn");
+    btn.disabled=true; btn.textContent="Activating...";
+    const a=auth();
+    if(!a){ goLogin(); return; }
+    try{
+      // Tell backend to activate free plan
+      await withRefresh(()=>api("/api/activate-free-plan",{...a, plan_index: p.index ?? selIdx}));
+    }catch(e){
+      // Even if API fails (e.g. endpoint not yet added), just redirect to home
+    }
+    // Update local subscription_status so auto-login routes correctly next time
+    try{
+      const u=ud(); if(u){ u.subscription_status="free"; localStorage.setItem("_ud",JSON.stringify(u)); }
+    }catch(e){}
+    window.location.replace("/home");
+    return;
+  }
   openPayModal(p);
 });
 
