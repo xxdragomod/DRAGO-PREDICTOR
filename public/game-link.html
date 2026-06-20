@@ -59,18 +59,18 @@ body{
 
 .open-tab-btn{
   flex-shrink:0;
-  padding:8px 14px;border-radius:20px;border:none;
-  background:linear-gradient(135deg,#7C5CFC,#5B6AF0);
-  color:#fff;font-family:'Montserrat',sans-serif;
-  font-size:11px;font-weight:800;letter-spacing:.3px;
+  width:36px;height:36px;
+  border-radius:50%;border:none;
+  background:rgba(255,255,255,.15);
+  border:1.5px solid rgba(255,255,255,.25);
+  color:#fff;
   cursor:pointer;
-  box-shadow:0 4px 12px rgba(124,92,252,.4);
-  display:flex;align-items:center;gap:6px;
-  transition:transform .18s cubic-bezier(.34,1.56,.64,1);
+  display:flex;align-items:center;justify-content:center;
+  transition:background .18s,transform .18s cubic-bezier(.34,1.56,.64,1);
   -webkit-tap-highlight-color:transparent;
 }
-.open-tab-btn:active{transform:scale(.94)}
-.open-tab-btn i{font-size:12px}
+.open-tab-btn:active{transform:scale(.88);background:rgba(255,255,255,.25)}
+.open-tab-btn i{font-size:14px}
 
 /* ── iframe wrapper fills remaining height ── */
 .frame-wrap{
@@ -197,9 +197,8 @@ body{
     <span class="hero-title" id="heroTitle">Game</span>
     <span class="hero-sub">Drago Predictor</span>
   </div>
-  <button class="open-tab-btn" id="openTabBtn" title="Open in new tab">
+  <button class="open-tab-btn" id="openTabBtn" title="Open in new tab" aria-label="Open in new tab">
     <i class="fa-solid fa-arrow-up-right-from-square"></i>
-    New Tab
   </button>
   <img src="https://i.ibb.co/Cp6rPPxp/20260218-115056.png" alt="Drago" class="hero-logo">
 </div>
