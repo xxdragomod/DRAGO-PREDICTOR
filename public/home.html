@@ -44,38 +44,31 @@ body{
 .qcard h3{font-size:15px;font-weight:800;color:#1a1a2e;margin-bottom:4px}
 .qcard span{font-size:11px;color:#6b7280;font-weight:600}
 
-/* Navbar — floating pill (consistent with all pages) */
+/* Navbar — floating pill, always visible */
 .navbar{
-  background:rgba(255,255,255,0.88);
-  backdrop-filter:blur(18px);
-  -webkit-backdrop-filter:blur(18px);
+  background:rgba(255,255,255,0.92);
+  backdrop-filter:blur(20px);
+  -webkit-backdrop-filter:blur(20px);
   width:calc(100% - 28px);
   max-width:432px;
   border-radius:28px;
   padding:10px 6px;
   display:flex;justify-content:space-around;align-items:center;
-  box-shadow:0 8px 28px rgba(100,80,220,.14);
-  border:1.5px solid rgba(255,255,255,0.9);
+  box-shadow:0 8px 28px rgba(100,80,220,.15);
+  border:1.5px solid rgba(255,255,255,0.95);
   position:fixed;bottom:14px;
   left:50%;transform:translateX(-50%);
-  transition:opacity .4s ease,transform .4s ease;
+  animation:navSlideUp .4s .1s cubic-bezier(.22,1,.36,1) both;
   z-index:900;
 }
-.navbar.hidden{opacity:0;transform:translateX(-50%) translateY(20px);pointer-events:none}
+@keyframes navSlideUp{from{opacity:0;transform:translateX(-50%) translateY(24px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
 .nav-item{display:flex;align-items:center;padding:8px 14px;border-radius:20px;text-decoration:none;color:#888;transition:all .25s cubic-bezier(.34,1.56,.64,1);-webkit-tap-highlight-color:transparent}
 .nav-item i{font-size:18px}
 .nav-item span{margin-left:0;max-width:0;overflow:hidden;transition:.25s;white-space:nowrap;font-weight:800;font-size:13px}
 .nav-item.active{background-color:#7680F5;color:#fff}
 .nav-item.active span{margin-left:7px;max-width:100px}
 
-#expandBtn{
-  position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
-  background:linear-gradient(135deg,#7C5CFC,#5B6AF0);
-  color:#fff;padding:10px 22px;border-radius:50px;cursor:pointer;
-  display:none;box-shadow:0 6px 18px rgba(124,92,252,.35);z-index:1000;
-  font-weight:800;font-size:13px;letter-spacing:.4px;
-  -webkit-tap-highlight-color:transparent;
-}
+
 
 /* Status overlay */
 .full-ov{display:none;position:fixed;inset:0;z-index:3000;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:30px;background:linear-gradient(180deg,#c3caff,#e2e5ff 40%,#fff)}
@@ -161,9 +154,6 @@ body{
   </div>
 </div>
 
-<!-- Expand Button -->
-<div id="expandBtn">✦ &#119930;&#119919;&#119926;&#119934; ✦</div>
-
 <!-- Navbar -->
 <nav class="navbar" id="navbar">
   <a href="/home" class="nav-item active"><i class="fa-solid fa-house"></i><span>Home</span></a>
@@ -244,53 +234,22 @@ function mkAvatar(el,name){
 async function init(){
   const a=auth(); if(!a){ goLogin(); return; }
   loadProfile();
+  // Fallback: always show page within 4s even if API hangs
+  const loaderTimeout=setTimeout(()=>{ hideLoader(); startPoll(); },4000);
   try{
     const d=await withRefresh(()=>api("/api/account-status",a));
-    if(!handleStatus(d.account_status||"active",d.subscription_status||"none")) { hideLoader(); return; }
+    clearTimeout(loaderTimeout);
+    if(!handleStatus(d.account_status||"active",d.subscription_status||"none")){ hideLoader(); return; }
     startPoll();
-  }catch(e){
-    // network error: still show page, retry via poll
-    startPoll();
-  }
+  }catch(e){ clearTimeout(loaderTimeout); startPoll(); }
   hideLoader();
 }
-function hideLoader(){ const l=document.getElementById("loadingOverlay"); l.style.opacity="0"; setTimeout(()=>l.style.display="none",300); }
+function hideLoader(){ const l=document.getElementById("loadingOverlay"); if(!l) return; l.style.opacity="0"; setTimeout(()=>{ if(l) l.style.display="none"; },300); }
 
 // quick card / nav actions
-  document.getElementById("cardPlan").addEventListener("click",()=>window.location.href="/payment");
-  document.getElementById("cardGame").addEventListener("click",()=>window.location.href="/game");
+document.getElementById("cardPlan").addEventListener("click",()=>window.location.href="/payment");
+document.getElementById("cardGame").addEventListener("click",()=>window.location.href="/game");
 document.getElementById("navGame").addEventListener("click",()=>window.location.href="/game");
-
-// ── Navbar auto-hide / expand ──
-(function(){
-  const navbar=document.getElementById('navbar');
-  const expandBtn=document.getElementById('expandBtn');
-  const items=document.querySelectorAll('.nav-item');
-  let timer;
-  function startTimer(){
-    clearTimeout(timer);
-    timer=setTimeout(()=>{
-      navbar.classList.add('hidden');
-      setTimeout(()=>{ navbar.style.display='none'; expandBtn.style.display='block'; },400);
-    },10000);
-  }
-  expandBtn.addEventListener('click',()=>{
-    navbar.style.display='flex';
-    setTimeout(()=>navbar.classList.remove('hidden'), 10);
-    expandBtn.style.display='none';
-    startTimer();
-  });
-  items.forEach(item=>{
-    item.addEventListener('click',function(){
-      items.forEach(i=>i.classList.remove('active'));
-      this.classList.add('active');
-      startTimer();
-    });
-  });
-  window.addEventListener('mousemove',startTimer);
-  window.addEventListener('touchstart',startTimer);
-  startTimer();
-})();
 
 init();
 </script>
