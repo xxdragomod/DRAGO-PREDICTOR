@@ -161,34 +161,76 @@ body{
 .results-loading{width:100%;display:flex;justify-content:center;padding:40px 0}
 .results-loading .spinner{width:34px;height:34px}
 
-/* ── Navbar — single floating pill (always visible) ── */
-.navbar{
-  background:rgba(255,255,255,0.92);
-  backdrop-filter:blur(20px);
-  -webkit-backdrop-filter:blur(20px);
-  width:calc(100% - 28px);
-  max-width:432px;
-  border-radius:28px;
-  padding:10px 6px;
-  display:flex;justify-content:space-around;align-items:center;
-  box-shadow:0 8px 28px rgba(100,80,220,.15);
-  border:1.5px solid rgba(255,255,255,0.95);
-  position:fixed;bottom:14px;
-  left:50%;transform:translateX(-50%);
-  animation:navSlideUp .4s .1s cubic-bezier(.22,1,.36,1) both;
-  z-index:900;
+/* ── FAB navigation ── */
+.fab-container{
+  position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+  z-index:500;display:flex;align-items:center;justify-content:center;
+  background:transparent;border-radius:40px;box-shadow:none;padding:0;gap:0;
+  transition:background .35s ease,box-shadow .35s ease,padding .35s cubic-bezier(.22,1,.36,1),gap .35s cubic-bezier(.22,1,.36,1);
 }
-@keyframes navSlideUp{from{opacity:0;transform:translateX(-50%) translateY(24px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
-.nav-item{
-  display:flex;align-items:center;padding:8px 14px;
-  border-radius:20px;text-decoration:none;color:#888;
-  transition:all .25s cubic-bezier(.34,1.56,.64,1);
-  -webkit-tap-highlight-color:transparent;
+.fab-container.open{
+  background:#fff;
+  box-shadow:0 10px 34px rgba(91,106,240,.22),0 2px 8px rgba(0,0,0,.06);
+  padding:9px 12px;gap:8px;
 }
-.nav-item i{font-size:18px}
-.nav-item span{margin-left:0;max-width:0;overflow:hidden;transition:.25s;white-space:nowrap;font-weight:800;font-size:13px}
-.nav-item.active{background-color:#7680F5;color:#fff}
-.nav-item.active span{margin-left:7px;max-width:100px}
+.fab-toggle-wrap{display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.fab-toggle{
+  width:52px;height:52px;border-radius:50%;
+  background:linear-gradient(135deg,#7C5CFC,#5B6AF0);border:none;
+  display:flex;align-items:center;justify-content:center;cursor:pointer;
+  box-shadow:0 4px 18px rgba(124,92,252,.5);
+  transition:transform .22s cubic-bezier(.34,1.56,.64,1),background .2s;
+  -webkit-tap-highlight-color:transparent;position:relative;z-index:2;flex-shrink:0;
+}
+.fab-toggle:active{transform:scale(.9)}
+.fab-toggle i{font-size:20px;color:#fff;transition:transform .3s ease}
+.fab-toggle.open i{transform:rotate(45deg)}
+.fab-side{
+  display:flex;align-items:center;overflow:hidden;
+  max-width:0;transition:max-width .35s cubic-bezier(.22,1,.36,1);flex-shrink:0;
+}
+.fab-side.show{max-width:200px}
+.fab-left{justify-content:flex-end}
+.fab-right{justify-content:flex-start}
+.fab-side-btn{
+  height:44px;padding:0 18px;border-radius:24px;border:none;
+  display:flex;flex-direction:row;align-items:center;justify-content:center;gap:8px;
+  cursor:pointer;white-space:nowrap;
+  transition:transform .2s cubic-bezier(.34,1.56,.64,1),opacity .25s;
+  -webkit-tap-highlight-color:transparent;flex-shrink:0;opacity:0;transform:scale(.5);
+}
+.fab-side.show .fab-side-btn{opacity:1;transform:scale(1);transition-delay:.08s}
+.fab-hack-btn{background:linear-gradient(135deg,#7C5CFC,#5B6AF0);box-shadow:0 4px 14px rgba(124,92,252,.45)}
+.fab-setting-btn{background:linear-gradient(135deg,#7C5CFC,#5B6AF0);box-shadow:0 4px 14px rgba(124,92,252,.45)}
+.fab-side-btn i{font-size:15px;color:#fff}
+.fab-side-btn span{font-size:13px;font-weight:800;color:#fff;letter-spacing:.3px;line-height:1}
+.fab-side-btn:active{transform:scale(.92) !important}
+
+/* ── Slide-up panels ── */
+.panel-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:400;
+  opacity:0;pointer-events:none;transition:opacity .3s;
+}
+.panel-overlay.show{opacity:1;pointer-events:all}
+.slide-panel{
+  position:fixed;bottom:0;left:0;right:0;z-index:450;
+  background:linear-gradient(180deg,#1a1a3e 0%,#0f0f1a 100%);
+  border-radius:24px 24px 0 0;border-top:1px solid rgba(124,92,252,.3);
+  padding:20px 20px 40px;transform:translateY(100%);
+  transition:transform .38s cubic-bezier(.22,1,.36,1);
+  height:70vh;max-height:70vh;overflow-y:auto;
+}
+.slide-panel.show{transform:translateY(0)}
+.panel-handle{width:40px;height:4px;background:rgba(255,255,255,.2);border-radius:2px;margin:0 auto 18px}
+.panel-header{display:flex;align-items:center;gap:10px;margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid rgba(124,92,252,.2)}
+.panel-header-icon{width:38px;height:38px;border-radius:12px;display:flex;align-items:center;justify-content:center}
+.panel-header-icon.hack{background:linear-gradient(135deg,#FF6B6B,#FF4757)}
+.panel-header-icon.setting{background:linear-gradient(135deg,#26c6da,#0097A7)}
+.panel-header-icon i{font-size:18px;color:#fff}
+.panel-title{font-size:18px;font-weight:900;color:#fff}
+.panel-subtitle{font-size:11px;font-weight:700;color:rgba(180,160,255,.7);text-transform:uppercase;letter-spacing:.5px}
+.panel-content{min-height:120px;display:flex;align-items:center;justify-content:center}
+.panel-empty{font-size:13px;font-weight:600;color:rgba(200,200,255,.3);text-align:center;letter-spacing:.3px}
 
 /* ── Status overlays ── */
 .full-ov{display:none;position:fixed;inset:0;z-index:3000;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:30px;background:linear-gradient(180deg,#c3caff,#e2e5ff 40%,#fff)}
@@ -294,13 +336,47 @@ body{
 
 </div><!-- /page-wrap -->
 
-<!-- Navbar — floating pill -->
-<nav class="navbar" id="navbar">
-  <a href="/home"    class="nav-item"><i class="fa-solid fa-house"></i><span>Home</span></a>
-  <a href="/game"    class="nav-item active"><i class="fa-solid fa-gamepad"></i><span>Game</span></a>
-  <a href="/payment" class="nav-item"><i class="fa-solid fa-calendar-check"></i><span>Plan</span></a>
-  <a href="/profile" class="nav-item"><i class="fa-regular fa-user"></i><span>Profile</span></a>
-</nav>
+<!-- FAB navigation -->
+<div class="fab-container" id="fabContainer">
+  <div class="fab-side fab-left" id="fabLeft">
+    <button class="fab-side-btn fab-hack-btn" id="hackBtn" aria-label="Hack">
+      <i class="fa-solid fa-bolt"></i><span>Hack</span>
+    </button>
+  </div>
+  <div class="fab-toggle-wrap">
+    <button class="fab-toggle" id="fabToggle" aria-label="Toggle menu">
+      <i class="fa-solid fa-plus"></i>
+    </button>
+  </div>
+  <div class="fab-side fab-right" id="fabRight">
+    <button class="fab-side-btn fab-setting-btn" id="settingBtn" aria-label="Settings">
+      <i class="fa-solid fa-gear"></i><span>Setting</span>
+    </button>
+  </div>
+</div>
+
+<!-- Panel overlay -->
+<div class="panel-overlay" id="panelOverlay"></div>
+
+<!-- Hack panel -->
+<div class="slide-panel" id="hackPanel">
+  <div class="panel-handle"></div>
+  <div class="panel-header">
+    <div class="panel-header-icon hack"><i class="fa-solid fa-bolt"></i></div>
+    <div><div class="panel-title">Hack</div><div class="panel-subtitle">Prediction Tools</div></div>
+  </div>
+  <div class="panel-content"><div class="panel-empty">Hack content yahan aayega</div></div>
+</div>
+
+<!-- Settings panel -->
+<div class="slide-panel" id="settingPanel">
+  <div class="panel-handle"></div>
+  <div class="panel-header">
+    <div class="panel-header-icon setting"><i class="fa-solid fa-gear"></i></div>
+    <div><div class="panel-title">Settings</div><div class="panel-subtitle">App Preferences</div></div>
+  </div>
+  <div class="panel-content"><div class="panel-empty">Settings content yahan aayega</div></div>
+</div>
 
 <script>
 const API = "https://flask-hello-world-nu-sooty-63.vercel.app";
@@ -470,7 +546,6 @@ window.selectPeriod = function(period){
 async function init(){
   const a = auth(); if(!a){ goLogin(); return; }
   loadProfile();
-  // Timeout fallback — always show page within 4s even if API hangs
   const loaderTimeout = setTimeout(()=>{ hideLoader(); startPoll(); }, 4000);
   try{
     const d = await withRefresh(()=>api("/api/account-status", a));
@@ -481,6 +556,28 @@ async function init(){
   hideLoader();
 }
 function hideLoader(){ const l=document.getElementById("loadingOverlay"); if(!l) return; l.style.opacity="0"; setTimeout(()=>{ if(l) l.style.display="none"; },300); }
+
+/* ── FAB logic ── */
+(function(){
+  const fabContainer = document.getElementById("fabContainer");
+  const fabToggle    = document.getElementById("fabToggle");
+  const fabLeft      = document.getElementById("fabLeft");
+  const fabRight     = document.getElementById("fabRight");
+  const hackBtn      = document.getElementById("hackBtn");
+  const settingBtn   = document.getElementById("settingBtn");
+  const overlay      = document.getElementById("panelOverlay");
+  const hackPanel    = document.getElementById("hackPanel");
+  const settingPanel = document.getElementById("settingPanel");
+  let fabOpen = false;
+  function openFab(){ fabOpen=true; fabContainer.classList.add("open"); fabToggle.classList.add("open"); fabLeft.classList.add("show"); fabRight.classList.add("show"); }
+  function closeFab(){ fabOpen=false; fabContainer.classList.remove("open"); fabToggle.classList.remove("open"); fabLeft.classList.remove("show"); fabRight.classList.remove("show"); }
+  function openPanel(w){ overlay.classList.add("show"); if(w==="hack"){ hackPanel.classList.add("show"); settingPanel.classList.remove("show"); } else { settingPanel.classList.add("show"); hackPanel.classList.remove("show"); } }
+  function closePanel(){ overlay.classList.remove("show"); hackPanel.classList.remove("show"); settingPanel.classList.remove("show"); }
+  fabToggle.addEventListener("click",()=>{ fabOpen ? (closeFab(),closePanel()) : openFab(); });
+  hackBtn.addEventListener("click",()=>openPanel("hack"));
+  settingBtn.addEventListener("click",()=>openPanel("setting"));
+  overlay.addEventListener("click",()=>closePanel());
+})();
 
 init();
 </script>
