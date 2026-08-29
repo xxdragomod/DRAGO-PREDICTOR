@@ -1,11 +1,10 @@
 {
   "name": "drago-backend",
   "version": "2.0.0",
-  "description": "DRAGO main API (Render) — auth, payment, proxy to prediction VPS",
+  "description": "DRAGO main API (Render)",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
   "engines": {
     "node": ">=18"

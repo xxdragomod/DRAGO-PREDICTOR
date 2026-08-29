@@ -1,0 +1,9 @@
+node_modules/
+.env
+env
+local.env
+*.log
+payments.json
+wingo30s_history.json
+admin-settings.json
+.DS_Store
