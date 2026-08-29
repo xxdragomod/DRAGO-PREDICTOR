@@ -63,6 +63,7 @@ const WINGO_HISTORY_URL = (
   process.env.WINGO_HISTORY_URL ||
   "http://46.247.108.191:30296/api/history"
 ).replace(/\/$/, "");
+const VPS_SECRET = (process.env.VPS_SECRET || process.env.DRAGO_VPS_SECRET || "").trim();
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
 const SIGNATURE_MAX_SKEW_MS = Number(process.env.SIGNATURE_MAX_SKEW_MS) || 120000; // 2 min
@@ -670,6 +671,15 @@ function usageMap(rows) {
   return out;
 }
 
+function vpsHeaders() {
+  const h = { Accept: "application/json" };
+  if (VPS_SECRET) {
+    h["X-VPS-Key"] = VPS_SECRET;
+    h["Authorization"] = "Bearer " + VPS_SECRET;
+  }
+  return h;
+}
+
 async function fetchWingoPrediction() {
   if (!WINGO_PREDICTION_URL) {
     const err = new Error("Prediction source not configured");
@@ -678,7 +688,7 @@ async function fetchWingoPrediction() {
   }
   const response = await fetch(WINGO_PREDICTION_URL, {
     signal: AbortSignal.timeout(10000),
-    headers: { Accept: "application/json" },
+    headers: vpsHeaders(),
   });
   if (!response.ok) {
     const err = new Error(`Upstream error: ${response.status}`);
@@ -900,7 +910,7 @@ async function fetchWingoHistoryFromVps(limit) {
   }
   const response = await fetch(url.toString(), {
     signal: AbortSignal.timeout(12000),
-    headers: { Accept: "application/json" },
+    headers: vpsHeaders(),
   });
   if (!response.ok) {
     const err = new Error(`Upstream history error: ${response.status}`);
@@ -933,7 +943,7 @@ async function pingVps(kind) {
     const r = await fetch(target, {
       method: "GET",
       signal: AbortSignal.timeout(8000),
-      headers: { Accept: "application/json" },
+      headers: vpsHeaders(),
     });
     return {
       ok: r.status < 500,
@@ -2099,7 +2109,7 @@ app.get("/wingo30s_prediction", async (req, res) => {
   try {
     const response = await fetch(WINGO_PREDICTION_URL, {
       signal: AbortSignal.timeout(10000),
-      headers: { Accept: "application/json" },
+      headers: vpsHeaders(),
     });
 
     if (!response.ok) {
@@ -3194,6 +3204,7 @@ async function boot() {
     console.log(`   Database: MongoDB Atlas`);
 
     console.log(`   History VPS: ${WINGO_HISTORY_URL}`);
+    console.log(`   VPS auth: ${VPS_SECRET ? "enabled" : "MISSING — set VPS_SECRET"}`);
     console.log(`   Data store: none on Render (proxy → orihost only)`);
 
     // Load payments.json + mark stale PENDING → EXPIRED (rows never deleted)
