@@ -883,6 +883,9 @@ function expireStaleOrders() {
 // Prediction + history dono VPS se aate hain. Render sirf forward karta hai.
 const WINGO_HISTORY_MAX = 1000;
 
+// Last good prediction — upstream (VPS) fail ho to stale fallback serve karte
+let predCache = { at: 0, prediction: null, fetched_at: "" };
+
 function extractHistoryList(payload) {
   if (!payload) return [];
   if (Array.isArray(payload)) return payload;
@@ -1848,6 +1851,9 @@ const sigPublic = requireAppSignature("public-app");
 // Auth-bound app APIs
 app.use(["/verify", "/profile", "/prediction-quota", "/wingo30s_prediction", "/payment-history", "/api-keys", "/api-usage", "/system-status", "/games"], sigAuth);
 app.use("/api-keys", sigAuth);
+// Market data (no JWT) — frontend prediction page ka live chart yahin se leta hai
+// (browser ko lottery API se direct CORS/Cloudflare 403 milta hai, isliye proxy)
+app.use("/market", sigPublic);
 app.use("/payment-config", sigPay);
 app.use("/create-payment", sigPay);
 app.use("/manual-payment", sigPay);
@@ -2145,6 +2151,13 @@ app.get("/wingo30s_prediction", async (req, res) => {
         ? freeUsed + 1
         : freeUsed;
 
+    // Fresh result ko cache rakho — upstream fail ho to stale fallback
+    predCache = {
+      at: Date.now(),
+      prediction: clean,
+      fetched_at: new Date().toISOString(),
+    };
+
     res.json({
       success: true,
       prediction: clean,
@@ -2157,6 +2170,25 @@ app.get("/wingo30s_prediction", async (req, res) => {
     });
   } catch (err) {
     console.error("prediction error:", err.message);
+    // VPS down hai par 15 min se purana NAHI wala cached prediction de do —
+    // user ko "STALE" flag ke saath pichli prediction dikhe, blank na ho.
+    if (
+      predCache.prediction &&
+      Date.now() - predCache.at < 15 * 60 * 1000
+    ) {
+      return res.json({
+        success: true,
+        stale: true,
+        stale_reason: "source offline — last known prediction served",
+        prediction: predCache.prediction,
+        plan: isPro ? "pro" : "free",
+        free_pred_used: isPro ? 0 : freeUsed,
+        free_pred_limit: freePredLimit(),
+        free_pred_remaining: isPro
+          ? null
+          : Math.max(0, freePredLimit() - freeUsed),
+      });
+    }
     res.status(502).json({
       success: false,
       message: "Failed to fetch prediction from source",
@@ -2804,6 +2836,73 @@ app.get("/games/:id", async (req, res) => {
     return res.status(404).json({ success: false, message: "Game not found" });
   }
   res.json({ success: true, game: row });
+});
+
+/* ─── Market data proxy (NO JWT) ─────────────────────────────────────────
+ * Browser ko lottery API (draw.ar-lottery01.com) se direct CORS + Cloudflare
+ * 403 milta hai, isliye frontend ka live market chart RENDER se proxy maangta hai.
+ * GET /market/wingo30s/history?limit=30   →  { success, items, updated_at }
+ * 10-sec in-memory cache se VPS pe load nahi padta (2s poll hone par bhi). */
+const MARKET_CACHE_TTL_MS = 10 * 1000;
+let marketCache = { at: 0, items: [], updated_at: "" };
+
+app.get("/market/wingo30s/history", async (req, res) => {
+  let limit = Number.parseInt(String(req.query.limit ?? "30"), 10);
+  if (!Number.isFinite(limit) || limit < 1) limit = 30;
+  limit = Math.min(WINGO_HISTORY_MAX, limit);
+
+  const now = Date.now();
+  if (
+    marketCache.at &&
+    now - marketCache.at < MARKET_CACHE_TTL_MS &&
+    marketCache.items.length
+  ) {
+    return res.json({
+      success: true,
+      count: Math.min(limit, marketCache.items.length),
+      limit,
+      Server: SERVER_BRAND,
+      updated_at: marketCache.updated_at,
+      cached: true,
+      items: marketCache.items.slice(0, limit),
+    });
+  }
+
+  try {
+    const { items, updated_at } = await fetchWingoHistoryFromVps(
+      Math.max(limit, 60)
+    );
+    marketCache = { at: Date.now(), items, updated_at };
+    res.json({
+      success: true,
+      count: Math.min(limit, items.length),
+      limit,
+      Server: SERVER_BRAND,
+      updated_at,
+      cached: false,
+      items: items.slice(0, limit),
+    });
+  } catch (err) {
+    // VPS down hai par purana (stale) data dena behtar hai — chart blank na ho
+    if (marketCache.items.length) {
+      return res.status(200).json({
+        success: true,
+        stale: true,
+        count: Math.min(limit, marketCache.items.length),
+        limit,
+        Server: SERVER_BRAND,
+        updated_at: marketCache.updated_at,
+        cached: true,
+        items: marketCache.items.slice(0, limit),
+      });
+    }
+    console.error("market history proxy:", err.message);
+    res.status(err.status || 502).json({
+      success: false,
+      Server: SERVER_BRAND,
+      message: "Market data source offline",
+    });
+  }
 });
 
 /**
