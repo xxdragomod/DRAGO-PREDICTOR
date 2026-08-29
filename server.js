@@ -1684,47 +1684,58 @@ function requireAppSignature(mode) {
     if (req.path.startsWith("/v1") || String(req.originalUrl || "").startsWith("/v1")) {
       return next();
     }
+
+    const origin = req.get("origin") || "";
     const domain = clientDomain(req);
-    if (!isAllowedWebDomain(domain)) {
+
+    // Browser requests must come from allowed frontend domain
+    if (origin) {
+      try {
+        const host = new URL(origin).hostname.toLowerCase();
+        if (
+          host !== ALLOWED_WEB_DOMAIN &&
+          host !== "localhost" &&
+          host !== "127.0.0.1" &&
+          !host.endsWith(".vercel.app")
+        ) {
+          return res.status(404).json({ success: false, message: "Not found" });
+        }
+      } catch (_) {
+        return res.status(404).json({ success: false, message: "Not found" });
+      }
+    } else if (domain && !isAllowedWebDomain(domain) && !String(domain).endsWith(".vercel.app")) {
       return res.status(404).json({ success: false, message: "Not found" });
     }
+
+    // Optional hardening when client sends App-Id / signature
     const appId = String(req.get("x-app-id") || "").trim();
+    if (appId && APP_ID && !timingSafeEqualStr(appId, APP_ID)) {
+      return res.status(404).json({ success: false, message: "Not found" });
+    }
+
     const ts = String(req.get("x-timestamp") || "").trim();
     const sig = String(req.get("x-signature") || "").trim();
     const nonce = String(req.get("x-nonce") || "").trim();
-    if (!appId || !timingSafeEqualStr(appId, APP_ID)) {
-      return res.status(404).json({ success: false, message: "Not found" });
-    }
-    const tsNum = Number(ts);
-    if (!ts || !Number.isFinite(tsNum)) {
-      return res.status(401).json({ success: false, message: "Invalid timestamp" });
-    }
-    if (Math.abs(Date.now() - tsNum) > SIGNATURE_MAX_SKEW_MS) {
-      console.warn("timestamp skew", Math.abs(Date.now() - tsNum));
-      // soft-fail clock skew
-    }
-    if (mode === "payment" && (!nonce || nonce.length < 16)) {
-      return res.status(401).json({ success: false, message: "Nonce required" });
-    }
-    const pathOnly = String(req.originalUrl || req.url || "").split("?")[0];
     const userIdHdr = String(req.get("x-user-id") || "").trim();
     const userNameHdr = String(req.get("x-user-name") || "").trim();
-    const payload = buildSignPayload({
-      method: req.method,
-      pathOnly,
-      timestamp: ts,
-      nonce: mode === "payment" ? nonce : "",
-      body: req.method === "GET" || req.method === "HEAD" ? "" : req.body,
-      userId: mode === "auth" || mode === "payment" ? userIdHdr : "",
-      userName: mode === "auth" || mode === "payment" ? userNameHdr : "",
-    });
-    const expected = hmacSign(payload);
-    // Signature preferred; if missing/mismatch still allow when domain+App-Id OK
-    // (JWT / payment checks remain). Prevents total outage from client clock skew.
-    if (sig && !timingSafeEqualStr(sig, expected)) {
-      console.warn("signature mismatch", pathOnly, domain);
-      // soft-fail: continue — authUser still required on protected routes
+
+    if (sig && APP_SECRET && ts) {
+      const pathOnly = String(req.originalUrl || req.url || "").split("?")[0];
+      const payload = buildSignPayload({
+        method: req.method,
+        pathOnly,
+        timestamp: ts,
+        nonce: mode === "payment" ? nonce : "",
+        body: req.method === "GET" || req.method === "HEAD" ? "" : req.body,
+        userId: mode === "auth" || mode === "payment" ? userIdHdr : "",
+        userName: mode === "auth" || mode === "payment" ? userNameHdr : "",
+      });
+      const expected = hmacSign(payload);
+      if (!timingSafeEqualStr(sig, expected)) {
+        console.warn("signature mismatch", pathOnly);
+      }
     }
+
     req.dragoMeta = { domain, appId, ts, nonce, userIdHdr, userNameHdr };
     next();
   };
@@ -1755,6 +1766,7 @@ app.use((req, res, next) => {
     if (
       allowedOrigins.includes(origin) ||
       host === ALLOWED_WEB_DOMAIN ||
+      host.endsWith(".vercel.app") ||
       host === "localhost" ||
       host === "127.0.0.1"
     ) {
