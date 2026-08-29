@@ -23,7 +23,7 @@
  *   GET  /v1/wingo30s/prediction   prediction JSON (X-API-Key, 20/min)
  *   GET  /api-usage                own API usage stats (Bearer)
  * Telegram admin: /addgame /listgames /delgame <id> /cancel
- * Background: WinGo history poll every :00 / :30 → wingo30s_history.json (max 1000)
+ * Prediction + history: proxy to orihost VPS (no local data files on Render)
  */
 
 const path = require("path");
@@ -57,6 +57,11 @@ const ALLOWED_WEB_DOMAIN = (
 const WINGO_PREDICTION_URL = (
   process.env.WINGO_PREDICTION_URL ||
   "http://46.247.108.191:30296/api/prediction/wingo/30s/size"
+).replace(/\/$/, "");
+// History/data also on orihost VPS — Render pe kuch save nahi
+const WINGO_HISTORY_URL = (
+  process.env.WINGO_HISTORY_URL ||
+  "http://46.247.108.191:30296/api/history"
 ).replace(/\/$/, "");
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
@@ -864,75 +869,14 @@ function expireStaleOrders() {
   }
 }
 
-// ─── WinGo 30s history (poll at :00 / :30, max 1000 rows) ───────────────────
-const WINGO_HISTORY_URL =
-  process.env.WINGO_HISTORY_URL ||
-  "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json";
-const WINGO_HISTORY_PATH = path.join(__dirname, "wingo30s_history.json");
+// ─── WinGo data: proxy-only to orihost VPS (no local save) ─────────────────
+// Prediction + history dono VPS se aate hain. Render sirf forward karta hai.
 const WINGO_HISTORY_MAX = 1000;
-let wingoHistoryCache = null;
-let wingoHistoryMeta = {
-  last_poll_at: null,
-  last_ok: false,
-  last_error: null,
-  last_added: 0,
-  count: 0,
-};
-
-function loadWingoHistory() {
-  if (wingoHistoryCache) return wingoHistoryCache;
-  try {
-    if (!fs.existsSync(WINGO_HISTORY_PATH)) {
-      wingoHistoryCache = [];
-      return wingoHistoryCache;
-    }
-    const raw = fs.readFileSync(WINGO_HISTORY_PATH, "utf8");
-    const data = JSON.parse(raw || "[]");
-    if (Array.isArray(data)) {
-      wingoHistoryCache = data;
-    } else if (data && Array.isArray(data.items)) {
-      wingoHistoryCache = data.items;
-    } else {
-      wingoHistoryCache = [];
-    }
-  } catch (e) {
-    console.error("read wingo30s_history.json:", e.message);
-    wingoHistoryCache = [];
-  }
-  wingoHistoryMeta.count = wingoHistoryCache.length;
-  return wingoHistoryCache;
-}
-
-function saveWingoHistory(items) {
-  wingoHistoryCache = items;
-  wingoHistoryMeta.count = items.length;
-  const payload = {
-    updated_at: new Date().toISOString(),
-    count: items.length,
-    items,
-  };
-  const tmp = WINGO_HISTORY_PATH + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(payload), "utf8");
-  fs.renameSync(tmp, WINGO_HISTORY_PATH);
-}
-
-function issueKey(row) {
-  if (!row || typeof row !== "object") return null;
-  const k =
-    row.issueNumber ||
-    row.issue_number ||
-    row.issue ||
-    row.period ||
-    row.issueNo ||
-    row.issue_no ||
-    row.expect ||
-    null;
-  return k != null ? String(k) : null;
-}
 
 function extractHistoryList(payload) {
   if (!payload) return [];
   if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload.items)) return payload.items;
   if (Array.isArray(payload.list)) return payload.list;
   if (Array.isArray(payload.data)) return payload.data;
   if (payload.data && Array.isArray(payload.data.list)) return payload.data.list;
@@ -943,102 +887,66 @@ function extractHistoryList(payload) {
   return [];
 }
 
-async function pollWingoHistory() {
-  const t0 = Date.now();
-  try {
-    const res = await fetch(WINGO_HISTORY_URL, {
-      method: "GET",
-      signal: AbortSignal.timeout(12000),
-      headers: {
-        Accept: "application/json, text/plain, */*",
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        Referer: "https://draw.ar-lottery01.com/",
-        Origin: "https://draw.ar-lottery01.com",
-      },
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`HTTP ${res.status} ${body.slice(0, 120)}`);
-    }
-    const json = await res.json();
-    const incoming = extractHistoryList(json);
-    if (!incoming.length) {
-      wingoHistoryMeta.last_poll_at = new Date().toISOString();
-      wingoHistoryMeta.last_ok = true;
-      wingoHistoryMeta.last_error = "empty list";
-      wingoHistoryMeta.last_added = 0;
-      return;
-    }
-
-    const existing = loadWingoHistory();
-    const seen = new Set();
-    for (const row of existing) {
-      const k = issueKey(row);
-      if (k) seen.add(k);
-    }
-
-    const fresh = [];
-    for (const row of incoming) {
-      const k = issueKey(row);
-      if (!k || seen.has(k)) continue;
-      seen.add(k);
-      fresh.push(row);
-    }
-
-    // Newest first: new rows on top, then old; cap at 1000
-    let merged = fresh.length ? fresh.concat(existing) : existing;
-    if (merged.length > WINGO_HISTORY_MAX) {
-      merged = merged.slice(0, WINGO_HISTORY_MAX);
-    }
-    if (fresh.length || existing.length !== merged.length) {
-      saveWingoHistory(merged);
-    }
-
-    wingoHistoryMeta.last_poll_at = new Date().toISOString();
-    wingoHistoryMeta.last_ok = true;
-    wingoHistoryMeta.last_error = null;
-    wingoHistoryMeta.last_added = fresh.length;
-    wingoHistoryMeta.count = merged.length;
-    if (fresh.length) {
-      console.log(
-        `📊 wingo history +${fresh.length} (total ${merged.length}) ${Date.now() - t0}ms`
-      );
-    }
-  } catch (err) {
-    wingoHistoryMeta.last_poll_at = new Date().toISOString();
-    wingoHistoryMeta.last_ok = false;
-    wingoHistoryMeta.last_error = String(err.message || err).slice(0, 200);
-    console.error("wingo history poll:", wingoHistoryMeta.last_error);
+/** Fetch history from orihost — never write to disk on Render */
+async function fetchWingoHistoryFromVps(limit) {
+  if (!WINGO_HISTORY_URL) {
+    const err = new Error("History source not configured");
+    err.status = 503;
+    throw err;
   }
+  const url = new URL(WINGO_HISTORY_URL);
+  if (limit != null && Number.isFinite(limit) && limit > 0) {
+    url.searchParams.set("limit", String(Math.min(WINGO_HISTORY_MAX, limit)));
+  }
+  const response = await fetch(url.toString(), {
+    signal: AbortSignal.timeout(12000),
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    const err = new Error(`Upstream history error: ${response.status}`);
+    err.status = 502;
+    throw err;
+  }
+  const data = await response.json();
+  let items = extractHistoryList(data);
+  if (limit != null && Number.isFinite(limit) && limit > 0) {
+    items = items.slice(0, Math.min(WINGO_HISTORY_MAX, limit));
+  } else if (items.length > WINGO_HISTORY_MAX) {
+    items = items.slice(0, WINGO_HISTORY_MAX);
+  }
+  return {
+    items,
+    updated_at:
+      (data && (data.updated_at || data.updatedAt)) ||
+      new Date().toISOString(),
+    raw: data,
+  };
 }
 
-/** Align first run to next clock :00 or :30, then every 30s */
-function startWingoHistoryScheduler() {
-  const msToNextHalf = () => {
-    const now = Date.now();
-    const d = new Date(now);
-    const sec = d.getSeconds();
-    const ms = d.getMilliseconds();
-    const waitSec = sec < 30 ? 30 - sec : 60 - sec;
-    return Math.max(50, waitSec * 1000 - ms);
-  };
-
-  // Warm load + immediate first attempt (then schedule on half-minute)
+/** Lightweight VPS health for status page (no data stored) */
+async function pingVps(kind) {
+  const target =
+    kind === "history" ? WINGO_HISTORY_URL : WINGO_PREDICTION_URL;
+  if (!target) return { ok: false, detail: "Not configured", latency_ms: null };
+  const t0 = Date.now();
   try {
-    loadWingoHistory();
-  } catch (_) {}
-  pollWingoHistory().catch(() => {});
-
-  setTimeout(() => {
-    pollWingoHistory().catch(() => {});
-    setInterval(() => {
-      pollWingoHistory().catch(() => {});
-    }, 30 * 1000);
-  }, msToNextHalf());
-
-  console.log("   WinGo history poller: every :00 / :30 (+ align)");
+    const r = await fetch(target, {
+      method: "GET",
+      signal: AbortSignal.timeout(8000),
+      headers: { Accept: "application/json" },
+    });
+    return {
+      ok: r.status < 500,
+      detail: r.status < 500 ? "Online (VPS)" : `HTTP ${r.status}`,
+      latency_ms: Date.now() - t0,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      detail: "Unreachable",
+      latency_ms: Date.now() - t0,
+    };
+  }
 }
 
 function isDiskFullError(err) {
@@ -2797,20 +2705,37 @@ app.get("/system-status", async (req, res) => {
     }
   }
 
-  // WinGo history poller (keep — useful, no secret URL)
-  push(
-    "wingo_history",
-    "WinGo 30s History",
-    wingoHistoryMeta.last_ok || wingoHistoryMeta.count > 0,
-    wingoHistoryMeta.last_ok
-      ? `${wingoHistoryMeta.count} rows` +
-          (wingoHistoryMeta.last_added
-            ? ` (+${wingoHistoryMeta.last_added})`
-            : "")
-      : wingoHistoryMeta.last_error || "Waiting first poll",
-    wingoHistoryMeta.last_ok ? 100 : wingoHistoryMeta.count > 0 ? 50 : 0,
-    { url: "" }
-  );
+  // Orihost VPS — prediction + history (no local store on Render)
+  try {
+    const predPing = await pingVps("prediction");
+    push(
+      "wingo_prediction",
+      "Prediction Source (VPS)",
+      predPing.ok,
+      predPing.detail,
+      predPing.ok ? 100 : 0,
+      { latency_ms: predPing.latency_ms, url: "" }
+    );
+  } catch (_) {
+    push("wingo_prediction", "Prediction Source (VPS)", false, "Error", 0, {
+      url: "",
+    });
+  }
+  try {
+    const histPing = await pingVps("history");
+    push(
+      "wingo_history",
+      "History Source (VPS)",
+      histPing.ok,
+      histPing.detail,
+      histPing.ok ? 100 : 0,
+      { latency_ms: histPing.latency_ms, url: "" }
+    );
+  } catch (_) {
+    push("wingo_history", "History Source (VPS)", false, "Error", 0, {
+      url: "",
+    });
+  }
 
   const uptimeSec = Math.floor((Date.now() - SERVER_STARTED_AT) / 1000);
   const avg =
@@ -3014,25 +2939,35 @@ app.get("/v1/wingo30s/history", async (req, res) => {
   const auth = await requireApiKey(req, res, "history");
   if (!auth) return;
 
-  const items = loadWingoHistory();
-  // Newest first already in storage; limit controls how many to return
   let limit = Number.parseInt(String(req.query.limit ?? ""), 10);
   if (!Number.isFinite(limit) || limit < 1) {
-    // no limit / invalid → return all stored (capped)
-    limit = Math.min(WINGO_HISTORY_MAX, items.length || WINGO_HISTORY_MAX);
+    limit = WINGO_HISTORY_MAX;
   } else {
     limit = Math.min(WINGO_HISTORY_MAX, Math.max(1, limit));
   }
-  const slice = items.slice(0, limit);
 
-  res.json({
-    success: true,
-    count: slice.length,
-    limit,
-    Server: SERVER_BRAND,
-    updated_at: wingoHistoryMeta.last_poll_at || new Date().toISOString(),
-    items: slice,
-  });
+  try {
+    const { items, updated_at } = await fetchWingoHistoryFromVps(limit);
+    res.json({
+      success: true,
+      count: items.length,
+      limit,
+      Server: SERVER_BRAND,
+      updated_at,
+      items,
+    });
+  } catch (err) {
+    console.error("v1 history proxy:", err.message);
+    const status = err.status || 502;
+    res.status(status).json({
+      success: false,
+      Server: SERVER_BRAND,
+      message:
+        status === 503
+          ? "History source not configured"
+          : "Failed to fetch history from source",
+    });
+  }
 });
 
 /**
@@ -3258,12 +3193,8 @@ async function boot() {
     console.log(`   OAuth callback: /auth/google/callback`);
     console.log(`   Database: MongoDB Atlas`);
 
-    // WinGo 30s history file poller (:00 / :30)
-    try {
-      startWingoHistoryScheduler();
-    } catch (e) {
-      console.error("history scheduler:", e.message);
-    }
+    console.log(`   History VPS: ${WINGO_HISTORY_URL}`);
+    console.log(`   Data store: none on Render (proxy → orihost only)`);
 
     // Load payments.json + mark stale PENDING → EXPIRED (rows never deleted)
     try {
