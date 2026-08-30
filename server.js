@@ -991,26 +991,32 @@ async function telegramApi(method, body) {
 }
 
 async function notifyAdminManualPayment({ orderId, user, planKey, amount, utr }) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_ADMIN_CHAT_ID) {
-    console.warn("Telegram not configured — skip admin notify");
-    return;
+  if (!TELEGRAM_BOT_TOKEN) {
+    console.warn("Telegram: TELEGRAM_BOT_TOKEN missing — payment notify skipped");
+    return null;
+  }
+  if (!TELEGRAM_ADMIN_CHAT_ID) {
+    console.warn("Telegram: TELEGRAM_ADMIN_CHAT_ID missing — payment notify skipped");
+    return null;
   }
   const plan = PLAN_CATALOG[planKey];
   const when = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
   const text =
-    `🧾 New manual payment\n\n` +
+    `🧾 *New manual payment*\n\n` +
     `👤 Name: ${user.name || "—"}\n` +
     `📧 Email: ${user.email || "—"}\n` +
     `📦 Plan: ${plan ? plan.name : planKey}\n` +
     `💰 Amount: ₹${amount}\n` +
-    `🔖 UTR: ${utr}\n` +
-    `🆔 Order: ${orderId}\n` +
+    `🔖 UTR: \`${utr}\`\n` +
+    `🆔 Order: \`${orderId}\`\n` +
     `🕐 Time: ${when} IST`;
 
-  // callback_data max 64 bytes — use short codes a: / d:
+  // callback_data max 64 bytes — short codes
+  const chatId = TELEGRAM_ADMIN_CHAT_ID;
   const payload = {
-    chat_id: Number(TELEGRAM_ADMIN_CHAT_ID) || TELEGRAM_ADMIN_CHAT_ID,
+    chat_id: chatId,
     text,
+    parse_mode: "Markdown",
     reply_markup: {
       inline_keyboard: [
         [
@@ -1020,9 +1026,17 @@ async function notifyAdminManualPayment({ orderId, user, planKey, amount, utr })
       ],
     },
   };
-  const result = await telegramApi("sendMessage", payload);
+  let result = await telegramApi("sendMessage", payload);
+  // Retry without Markdown if parse fails
+  if (result && !result.ok && String(result.description || "").includes("parse")) {
+    delete payload.parse_mode;
+    payload.text = payload.text.replace(/\*/g, "").replace(/`/g, "");
+    result = await telegramApi("sendMessage", payload);
+  }
   if (!result || !result.ok) {
     console.error("Telegram sendMessage failed:", JSON.stringify(result));
+  } else {
+    console.log("Telegram: payment notify sent OK order=", orderId);
   }
   return result;
 }
@@ -3322,16 +3336,42 @@ async function boot() {
 
     // Prefer long-polling for Approve/Deny reliability on changing tunnels
     if (TELEGRAM_BOT_TOKEN) {
-      telegramApi("deleteWebhook", { drop_pending_updates: false }).then(() => {
-        console.log(
-          "   Telegram: long-polling enabled (Approve/Deny + /addgame)"
-        );
-        const loop = async () => {
-          await pollTelegramUpdates();
-          setTimeout(loop, 400);
-        };
-        loop();
-      });
+      console.log(`   Telegram token: set (${TELEGRAM_BOT_TOKEN.slice(0, 8)}...)`);
+      console.log(`   Telegram admin chat: ${TELEGRAM_ADMIN_CHAT_ID || "MISSING"}`);
+      telegramApi("deleteWebhook", { drop_pending_updates: false })
+        .then(async () => {
+          const me = await telegramApi("getMe", {});
+          if (me && me.ok) {
+            console.log(`   Telegram bot: @${me.result.username} online`);
+          } else {
+            console.error("   Telegram getMe failed:", JSON.stringify(me));
+          }
+          if (TELEGRAM_ADMIN_CHAT_ID) {
+            const ping = await telegramApi("sendMessage", {
+              chat_id: TELEGRAM_ADMIN_CHAT_ID,
+              text: "🐉 DRAGO payment bot online\nApprove/Deny ready.",
+            });
+            if (ping && ping.ok) {
+              console.log("   Telegram: admin ping OK");
+            } else {
+              console.error(
+                "   Telegram admin ping FAILED — check TELEGRAM_ADMIN_CHAT_ID:",
+                JSON.stringify(ping)
+              );
+            }
+          } else {
+            console.warn("   Telegram: set TELEGRAM_ADMIN_CHAT_ID to receive payment alerts");
+          }
+          console.log("   Telegram: long-polling enabled (Approve/Deny)");
+          const loop = async () => {
+            await pollTelegramUpdates();
+            setTimeout(loop, 400);
+          };
+          loop();
+        })
+        .catch((e) => console.error("Telegram boot:", e.message));
+    } else {
+      console.warn("   Telegram: TELEGRAM_BOT_TOKEN not set — payment alerts disabled");
     }
   });
 }
