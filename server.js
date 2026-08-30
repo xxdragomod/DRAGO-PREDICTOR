@@ -1851,6 +1851,7 @@ app.use("/market", sigPublic);
 app.use("/payment-config", sigPay);
 app.use("/create-payment", sigPay);
 app.use("/manual-payment", sigPay);
+app.use("/payment-appeal", sigPay);
 app.use("/order-status", sigPay);
 
 
@@ -3280,6 +3281,88 @@ app.get("/order-status", async (req, res) => {
       note: "provider unreachable, showing local status",
     });
   }
+});
+
+
+/**
+ * POST /payment-appeal  { order_id }
+ * User claims payment not verified → Telegram admin alert
+ */
+app.post("/payment-appeal", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+
+  const orderId = String((req.body && req.body.order_id) || "").trim();
+  if (!orderId || orderId.length < 6) {
+    return res.status(400).json({ success: false, message: "Valid Payment ID required" });
+  }
+
+  const user = await dbFindUserById(decoded.id);
+  if (!user) {
+    return res.status(404).json({ success: false, message: "User not found" });
+  }
+
+  const order = findOrder(orderId);
+  if (!order) {
+    return res.status(404).json({
+      success: false,
+      message: "Payment ID not found. Check and try again.",
+    });
+  }
+  if (Number(order.user_id) !== Number(decoded.id)) {
+    return res.status(403).json({
+      success: false,
+      message: "This Payment ID does not belong to your account.",
+    });
+  }
+
+  const plan = PLAN_CATALOG[order.plan] || {};
+  const when = order.created_at
+    ? new Date(order.created_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
+    : "—";
+  const text =
+    `⚠️ Payment Not Verified Appeal\n\n` +
+    `👤 Name: ${user.name || "—"}\n` +
+    `📧 Email: ${user.email || "—"}\n` +
+    `🆔 Payment ID: ${order.order_id}\n` +
+    `📦 Plan: ${plan.name || order.plan || "—"}\n` +
+    `💰 Amount: ₹${order.amount != null ? order.amount : "—"}\n` +
+    `📊 Status: ${order.payment_status || "—"}\n` +
+    `🔖 UTR: ${order.utr || "—"}\n` +
+    `🕐 Created: ${when} IST\n` +
+    `🕐 Appeal: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} IST`;
+
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_ADMIN_CHAT_ID) {
+    console.warn("Appeal saved locally but Telegram not configured");
+    return res.json({
+      success: true,
+      message: "Appeal received. Support will review.",
+      telegram: false,
+    });
+  }
+
+  const payload = {
+    chat_id: TELEGRAM_ADMIN_CHAT_ID,
+    text,
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "✅ Approve", callback_data: `a:${order.order_id}` },
+          { text: "❌ Deny", callback_data: `d:${order.order_id}` },
+        ],
+      ],
+    },
+  };
+  const result = await telegramApi("sendMessage", payload);
+  if (!result || !result.ok) {
+    console.error("Appeal telegram failed:", JSON.stringify(result));
+    return res.status(502).json({
+      success: false,
+      message: "Could not notify admin. Try again later.",
+    });
+  }
+
+  res.json({ success: true, message: "Appeal sent to admin." });
 });
 
 // 404
