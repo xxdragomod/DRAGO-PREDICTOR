@@ -1,31 +1,11 @@
 /**
- * DRAGO Backend — optimized
- * Express + MongoDB + Google OAuth (server-side) + JWT
+ * DRAGO Main API — Render
+ * Frontend (Vercel) → this server → Orihost VPS (prediction + history)
  *
- * Endpoints:
- *   GET  /                      health
- *   GET  /auth/google           start Google login
- *   GET  /auth/google/callback  OAuth callback → JWT → frontend
- *   GET  /verify                session check (Bearer token)
- *   GET  /profile               full profile (Bearer token)
- *   GET  /wingo30s_prediction   live prediction proxy
- *   POST /create-payment        Rupayex order (Bearer + plan)
- *   GET  /order-status          payment status (Bearer + order_id)
- *   GET  /payment-history       user orders list (Bearer)
- *   POST /manual-payment        custom QR + UTR claim (Bearer)
- *   GET  /system-status         status page checks (Bearer)
- *   GET  /games                 list games (public)
- *   GET  /games/:id             single game (public)
- *   POST /api-keys              create developer API key (Bearer)
- *   GET  /api-keys              list own API keys (Bearer)
- *   DELETE /api-keys/:id        revoke API key (Bearer)
- *   GET  /v1/wingo30s/history      history JSON (X-API-Key, 20/min)
- *   GET  /v1/wingo30s/prediction   prediction JSON (X-API-Key, 20/min)
- *   GET  /api-usage                own API usage stats (Bearer)
- * Telegram admin: /addgame /listgames /delgame <id> /cancel
- * Prediction + history: proxy to orihost VPS (no local data files on Render)
+ * Env: MONGODB_URI, JWT_SECRET, GOOGLE_*, APP_ID, APP_SECRET,
+ *      WINGO_PREDICTION_URL, WINGO_HISTORY_URL, VPS_SECRET,
+ *      TELEGRAM_*, FRONTEND_URL, ALLOWED_WEB_DOMAIN
  */
-
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
@@ -56,12 +36,12 @@ const ALLOWED_WEB_DOMAIN = (
 // Third-party prediction VPS (HTTP ok — server-to-server only, never exposed to browser)
 const WINGO_PREDICTION_URL = (
   process.env.WINGO_PREDICTION_URL ||
-  "http://46.247.108.191:30296/api/prediction/wingo/30s/size"
+  "http://2.56.246.119:30119/api/prediction/wingo/30s/size"
 ).replace(/\/$/, "");
 // History/data also on orihost VPS — Render pe kuch save nahi
 const WINGO_HISTORY_URL = (
   process.env.WINGO_HISTORY_URL ||
-  "http://46.247.108.191:30296/api/history"
+  "http://2.56.246.119:30119/api/history"
 ).replace(/\/$/, "");
 const VPS_SECRET = (process.env.VPS_SECRET || process.env.DRAGO_VPS_SECRET || "").trim();
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
