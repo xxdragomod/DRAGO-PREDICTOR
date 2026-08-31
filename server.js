@@ -161,12 +161,23 @@ function mapGame(doc) {
   };
 }
 
+function hashApiKey(raw) {
+  return crypto.createHash("sha256").update(String(raw || "")).digest("hex");
+}
+function maskApiKeyPrefix(prefix) {
+  const p = String(prefix || "drago_");
+  return p + "…" + "****";
+}
 function mapApiKey(doc) {
   if (!doc) return null;
+  const prefix =
+    doc.key_prefix ||
+    (doc.api_key ? String(doc.api_key).slice(0, 12) : "drago_");
   return {
     id: doc.id,
     user_id: doc.user_id,
-    api_key: doc.api_key,
+    key_prefix: prefix,
+    api_key_masked: maskApiKeyPrefix(prefix),
     name: doc.name || "default",
     created_at: doc.created_at || null,
     last_used_at: doc.last_used_at || null,
@@ -195,7 +206,8 @@ async function connectMongo() {
     col.users.createIndex({ id: 1 }, { unique: true }),
     col.games.createIndex({ id: 1 }, { unique: true }),
     col.games.createIndex({ sort_order: 1 }),
-    col.api_keys.createIndex({ api_key: 1 }, { unique: true }),
+    col.api_keys.createIndex({ key_hash: 1 }, { unique: true, sparse: true }),
+    col.api_keys.createIndex({ api_key: 1 }, { unique: true, sparse: true }),
     col.api_keys.createIndex({ user_id: 1 }),
     col.api_keys.createIndex({ id: 1 }, { unique: true }),
     col.api_usage.createIndex(
@@ -344,10 +356,13 @@ async function dbMaxGameOrder() {
 
 async function dbInsertApiKey(userId, apiKey, name) {
   const id = await nextSeq("api_keys");
+  const keyHash = hashApiKey(apiKey);
+  const keyPrefix = String(apiKey).slice(0, 12);
   const doc = {
     id,
     user_id: Number(userId),
-    api_key: apiKey,
+    key_hash: keyHash,
+    key_prefix: keyPrefix,
     name: name || "default",
     created_at: new Date().toISOString(),
     last_used_at: null,
@@ -363,7 +378,30 @@ async function dbListApiKeys(userId) {
   return rows.map(mapApiKey);
 }
 async function dbFindApiKey(key) {
-  return mapApiKey(await col.api_keys.findOne({ api_key: key }));
+  const raw = String(key || "").trim();
+  if (!raw) return null;
+  const keyHash = hashApiKey(raw);
+  let doc = await col.api_keys.findOne({ key_hash: keyHash });
+  if (!doc) {
+    doc = await col.api_keys.findOne({ api_key: raw });
+    if (doc) {
+      try {
+        await col.api_keys.updateOne(
+          { id: doc.id },
+          {
+            $set: { key_hash: keyHash, key_prefix: raw.slice(0, 12) },
+            $unset: { api_key: "" },
+          }
+        );
+        doc.key_hash = keyHash;
+        doc.key_prefix = raw.slice(0, 12);
+        delete doc.api_key;
+      } catch (e) {
+        console.warn("api key migrate:", e.message);
+      }
+    }
+  }
+  return mapApiKey(doc);
 }
 async function dbDeleteApiKey(id, userId) {
   const r = await col.api_keys.deleteOne({
@@ -1838,7 +1876,7 @@ app.use(
   })
 );
 
-// Extra: force ACAO=* on public /v1 developer endpoints (file:// + any site)
+// Developer API (/v1): CORS * intentional — keep for public developer access
 app.use("/v1", (req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader(
@@ -2348,8 +2386,7 @@ app.post("/create-payment", async (req, res) => {
       console.error("Rupayex create-order fail:", upstream.status, rawText.slice(0, 400));
       return res.status(502).json({
         success: false,
-        message: "Payment provider error",
-        detail: data || rawText.slice(0, 200),
+        message: "Payment provider error. Try again or use manual QR.",
       });
     }
 
@@ -2998,6 +3035,7 @@ app.post("/api-keys", async (req, res) => {
       success: true,
       id: Number(info.lastInsertRowid),
       api_key: apiKey,
+      key_prefix: apiKey.slice(0, 12),
       name,
       endpoints: {
         history: "/v1/wingo30s/history",
@@ -3008,6 +3046,7 @@ app.post("/api-keys", async (req, res) => {
         header: "X-API-Key: " + apiKey,
         query: "?api_key=" + apiKey,
       },
+      warning: "Copy this key now. It is stored hashed and cannot be shown again.",
     });
   } catch (e) {
     console.error("api-keys create:", e.message);
@@ -3027,7 +3066,8 @@ app.get("/api-keys", async (req, res) => {
     const today = usageMap(await dbUsageByKeyToday(r.id, day));
     keys.push({
       id: r.id,
-      api_key: r.api_key,
+      key_prefix: r.key_prefix,
+      api_key_masked: r.api_key_masked,
       name: r.name || "default",
       created_at: r.created_at,
       last_used_at: r.last_used_at || null,
