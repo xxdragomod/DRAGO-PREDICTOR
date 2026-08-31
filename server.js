@@ -142,6 +142,9 @@ function mapUser(doc) {
     pro_plan: doc.pro_plan || null,
     pro_expires_at: doc.pro_expires_at || null,
     free_pred_used: Number(doc.free_pred_used) || 0,
+    banned: doc.banned ? 1 : 0,
+    banned_at: doc.banned_at || null,
+    ban_reason: doc.ban_reason || null,
     created_at: doc.created_at || null,
   };
 }
@@ -279,6 +282,28 @@ async function dbBumpFreePred(userId) {
     { $inc: { free_pred_used: 1 } }
   );
 }
+
+async function dbBanUser(userId, reason) {
+  const r = await col.users.updateOne(
+    { id: Number(userId) },
+    {
+      $set: {
+        banned: 1,
+        banned_at: new Date().toISOString(),
+        ban_reason: String(reason || "policy").slice(0, 200),
+      },
+    }
+  );
+  return r.matchedCount > 0;
+}
+async function dbIsUserBanned(userId) {
+  const u = await col.users.findOne(
+    { id: Number(userId) },
+    { projection: { banned: 1, ban_reason: 1 } }
+  );
+  return u && u.banned ? { banned: true, reason: u.ban_reason || null } : { banned: false };
+}
+
 
 async function dbListGames() {
   const rows = await col.games
@@ -1842,6 +1867,29 @@ const sigAuth = requireAppSignature("auth");
 const sigPay = requireAppSignature("payment");
 const sigPublic = requireAppSignature("public-app");
 
+
+async function rejectIfBanned(req, res, next) {
+  try {
+    const token = bearerToken(req);
+    if (!token) return next();
+    const decoded = decodeToken(token);
+    if (!decoded || !decoded.id) return next();
+    const ban = await dbIsUserBanned(decoded.id);
+    if (ban.banned) {
+      return res.status(403).json({
+        success: false,
+        banned: true,
+        message: "Account suspended due to security policy violation.",
+        reason: ban.reason || "policy",
+      });
+    }
+  } catch (e) {
+    console.warn("rejectIfBanned:", e.message);
+  }
+  next();
+}
+app.use(["/verify", "/profile", "/prediction-quota", "/wingo30s_prediction", "/payment-history", "/payment-config", "/create-payment", "/manual-payment", "/order-status", "/api-keys", "/api-usage", "/system-status", "/games"], rejectIfBanned);
+
 // Auth-bound app APIs
 app.use(["/verify", "/profile", "/prediction-quota", "/wingo30s_prediction", "/payment-history", "/api-keys", "/api-usage", "/system-status", "/games"], sigAuth);
 app.use("/api-keys", sigAuth);
@@ -1974,6 +2022,24 @@ app.get("/auth/google/callback", async (req, res) => {
 });
 
 /** Session check — dashboard / guards */
+
+/** Ban account (e.g. client security report) — JWT required */
+app.post("/security/devtools-ban", async (req, res) => {
+  const token = bearerToken(req);
+  if (!token) return res.status(401).json({ success: false, message: "No token" });
+  const decoded = decodeToken(token);
+  if (!decoded || !decoded.id) return res.status(401).json({ success: false, message: "Invalid token" });
+  const reason = (req.body && req.body.reason) || "devtools";
+  try {
+    const ok = await dbBanUser(decoded.id, String(reason).slice(0, 120));
+    console.warn("🚫 BAN user=", decoded.id, "reason=", reason);
+    return res.json({ success: true, banned: true, applied: !!ok });
+  } catch (e) {
+    console.error("devtools-ban:", e.message);
+    return res.status(500).json({ success: false, message: "Ban failed" });
+  }
+});
+
 app.get("/verify", async (req, res) => {
   const decoded = authUser(req, res);
   if (!decoded) return;
