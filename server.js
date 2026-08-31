@@ -3293,6 +3293,7 @@ app.post("/payment-appeal", async (req, res) => {
   if (!decoded) return;
 
   const orderId = String((req.body && req.body.order_id) || "").trim();
+  const proofUrl = String((req.body && req.body.proof_image_url) || "").trim();
   if (!orderId || orderId.length < 6) {
     return res.status(400).json({ success: false, message: "Valid Payment ID required" });
   }
@@ -3330,10 +3331,11 @@ app.post("/payment-appeal", async (req, res) => {
     `📊 Status: ${order.payment_status || "—"}\n` +
     `🔖 UTR: ${order.utr || "—"}\n` +
     `🕐 Created: ${when} IST\n` +
-    `🕐 Appeal: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} IST`;
+    `🕐 Appeal: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} IST` +
+    (proofUrl ? `\n🖼 Proof: ${proofUrl}` : "");
 
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_ADMIN_CHAT_ID) {
-    console.warn("Appeal saved locally but Telegram not configured");
+    console.warn("Appeal received but Telegram not configured");
     return res.json({
       success: true,
       message: "Appeal received. Support will review.",
@@ -3341,19 +3343,31 @@ app.post("/payment-appeal", async (req, res) => {
     });
   }
 
-  const payload = {
-    chat_id: TELEGRAM_ADMIN_CHAT_ID,
-    text,
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "✅ Approve", callback_data: `a:${order.order_id}` },
-          { text: "❌ Deny", callback_data: `d:${order.order_id}` },
-        ],
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "✅ Approve", callback_data: `a:${order.order_id}` },
+        { text: "❌ Deny", callback_data: `d:${order.order_id}` },
       ],
-    },
+    ],
   };
-  const result = await telegramApi("sendMessage", payload);
+
+  let result = null;
+  if (proofUrl && /^https?:\/\//i.test(proofUrl)) {
+    result = await telegramApi("sendPhoto", {
+      chat_id: TELEGRAM_ADMIN_CHAT_ID,
+      photo: proofUrl,
+      caption: text.slice(0, 1000),
+      reply_markup: keyboard,
+    });
+  }
+  if (!result || !result.ok) {
+    result = await telegramApi("sendMessage", {
+      chat_id: TELEGRAM_ADMIN_CHAT_ID,
+      text,
+      reply_markup: keyboard,
+    });
+  }
   if (!result || !result.ok) {
     console.error("Appeal telegram failed:", JSON.stringify(result));
     return res.status(502).json({
