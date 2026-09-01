@@ -199,6 +199,7 @@ async function connectMongo() {
   col.api_keys = db.collection("api_keys");
   col.api_usage = db.collection("api_usage");
   col.counters = db.collection("counters");
+  col.banned_devices = db.collection("banned_devices");
 
   // Minimal indexes only (no bloat)
   await Promise.all([
@@ -308,12 +309,71 @@ async function dbBanUser(userId, reason) {
   );
   return r.matchedCount > 0;
 }
+/** DevTools detect → temporary block (admin UNLOCK kar sakta hai) */
+async function dbBlockUser(userId, reason, device) {
+  const r = await col.users.updateOne(
+    { id: Number(userId) },
+    {
+      $set: {
+        banned: 1,
+        ban_state: "blocked",
+        banned_at: new Date().toISOString(),
+        ban_reason: String(reason || "devtools").slice(0, 200),
+      },
+    }
+  );
+  if (device && col.banned_devices) {
+    await col.banned_devices.updateOne(
+      { device: String(device) },
+      {
+        $set: {
+          device: String(device),
+          user_id: Number(userId),
+          state: "blocked",
+          at: new Date().toISOString(),
+        },
+      },
+      { upsert: true }
+    );
+  }
+  return r.matchedCount > 0;
+}
+/** Admin Telegram se permanent BAN */
+async function dbBanPermanent(userId) {
+  await col.users.updateOne(
+    { id: Number(userId) },
+    { $set: { banned: 1, ban_state: "banned", banned_at: new Date().toISOString() } }
+  );
+  if (col.banned_devices) {
+    await col.banned_devices.updateMany(
+      { user_id: Number(userId) },
+      { $set: { state: "banned" } }
+    );
+  }
+}
+/** Admin Telegram se UNLOCK */
+async function dbUnbanUser(userId) {
+  await col.users.updateOne(
+    { id: Number(userId) },
+    { $set: { banned: 0, ban_state: "none", ban_reason: null } }
+  );
+  if (col.banned_devices) {
+    await col.banned_devices.deleteMany({ user_id: Number(userId) });
+  }
+}
 async function dbIsUserBanned(userId) {
   const u = await col.users.findOne(
     { id: Number(userId) },
-    { projection: { banned: 1, ban_reason: 1 } }
+    { projection: { banned: 1, ban_reason: 1, ban_state: 1 } }
   );
-  return u && u.banned ? { banned: true, reason: u.ban_reason || null } : { banned: false };
+  return u && u.banned
+    ? { banned: true, reason: u.ban_reason || null, state: u.ban_state === "banned" ? "banned" : "blocked" }
+    : { banned: false, state: "ok" };
+}
+async function dbBanStateByDevice(device) {
+  if (!device || !col.banned_devices) return null;
+  const d = await col.banned_devices.findOne({ device: String(device) });
+  return d ? (d.state === "banned" ? "banned" : "blocked") : null;
 }
 
 
@@ -1104,6 +1164,46 @@ async function notifyAdminManualPayment({ orderId, user, planKey, amount, utr })
   return result;
 }
 
+/** DevTools detect → admin ko BAN / UNLOCK buttons wala alert */
+async function notifyAdminDevtoolsBan({ user, userId, reason, device }) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_ADMIN_CHAT_ID) {
+    console.warn("Telegram: token/chat missing — devtools alert skipped");
+    return null;
+  }
+  const when = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+  const text =
+    `🚨 *DevTools detected — account BLOCKED*\n\n` +
+    `👤 Name: ${(user && user.name) || "—"}\n` +
+    `📧 Email: ${(user && user.email) || "—"}\n` +
+    `🆔 User ID: \`${userId}\`\n` +
+    `📱 Device: \`${device || "—"}\`\n` +
+    `🧾 Reason: ${String(reason || "devtools").slice(0, 80)}\n` +
+    `🕐 Time: ${when} IST\n\n` +
+    `UNLOCK → user wapas app use kar payega\nBAN → permanent ban (site hamesha 404 dikhegi)`;
+  const payload = {
+    chat_id: TELEGRAM_ADMIN_CHAT_ID,
+    text,
+    parse_mode: "Markdown",
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "⛔ BAN Permanent", callback_data: `bb:${userId}` },
+          { text: "🔓 UNLOCK", callback_data: `ub:${userId}` },
+        ],
+      ],
+    },
+  };
+  let result = await telegramApi("sendMessage", payload);
+  if (result && !result.ok && String(result.description || "").includes("parse")) {
+    delete payload.parse_mode;
+    payload.text = payload.text.replace(/[*`]/g, "");
+    result = await telegramApi("sendMessage", payload);
+  }
+  if (!result || !result.ok) console.error("Telegram devtools alert failed:", JSON.stringify(result));
+  else console.log("Telegram: devtools alert sent OK user=", userId);
+  return result;
+}
+
 /** Shared Approve / Deny handler (webhook + polling) */
 async function handleTelegramCallback(cb) {
   if (!cb || !cb.data) return;
@@ -1196,6 +1296,55 @@ async function handleTelegramCallback(cb) {
       });
     } catch (e) {
       console.error("tg panel edit:", e.message);
+    }
+    return;
+  }
+
+  // DevTools ban: ⛔ BAN / 🔓 UNLOCK
+  if (data.startsWith("bb:") || data.startsWith("ub:")) {
+    if (!isTelegramAdmin(chatId)) {
+      await telegramApi("answerCallbackQuery", {
+        callback_query_id: cb.id,
+        text: "Not admin",
+        show_alert: true,
+      });
+      return;
+    }
+    const uid = Number(data.slice(3));
+    if (!uid) {
+      await telegramApi("answerCallbackQuery", { callback_query_id: cb.id, text: "Bad user id" });
+      return;
+    }
+    if (data.startsWith("ub:")) {
+      await dbUnbanUser(uid);
+      await telegramApi("answerCallbackQuery", {
+        callback_query_id: cb.id,
+        text: "Unlocked — user can use app",
+      });
+      if (chatId && msgId) {
+        await telegramApi("editMessageText", {
+          chat_id: chatId,
+          message_id: msgId,
+          text: `🔓 UNLOCKED\nUser #${uid} ab wapas app use kar sakta hai.`,
+          reply_markup: { inline_keyboard: [] },
+        });
+      }
+      console.log("🔓 UNLOCK user=", uid);
+    } else {
+      await dbBanPermanent(uid);
+      await telegramApi("answerCallbackQuery", {
+        callback_query_id: cb.id,
+        text: "Banned permanently",
+      });
+      if (chatId && msgId) {
+        await telegramApi("editMessageText", {
+          chat_id: chatId,
+          message_id: msgId,
+          text: `⛔ PERMANENTLY BANNED\nUser #${uid} — site ab isko 404 dikhegi.`,
+          reply_markup: { inline_keyboard: [] },
+        });
+      }
+      console.log("⛔ PERMA-BAN user=", uid);
     }
     return;
   }
@@ -2068,14 +2217,45 @@ app.post("/security/devtools-ban", async (req, res) => {
   const decoded = decodeToken(token);
   if (!decoded || !decoded.id) return res.status(401).json({ success: false, message: "Invalid token" });
   const reason = (req.body && req.body.reason) || "devtools";
+  const device = String((req.body && req.body.device) || "").slice(0, 64);
   try {
-    const ok = await dbBanUser(decoded.id, String(reason).slice(0, 120));
-    console.warn("🚫 BAN user=", decoded.id, "reason=", reason);
-    return res.json({ success: true, banned: true, applied: !!ok });
+    // Pehle se permanent banned hai to dobara notify mat karo
+    const prev = await dbIsUserBanned(decoded.id);
+    if (prev.banned && prev.state === "banned") {
+      return res.json({ success: true, banned: true, state: "banned" });
+    }
+    const ok = await dbBlockUser(decoded.id, String(reason).slice(0, 120), device);
+    console.warn("🚫 BLOCK user=", decoded.id, "reason=", reason, "device=", device || "-");
+    const user = await dbFindUserByIdLite(decoded.id);
+    await notifyAdminDevtoolsBan({ user, userId: decoded.id, reason, device });
+    return res.json({ success: true, banned: true, state: "blocked", applied: !!ok });
   } catch (e) {
     console.error("devtools-ban:", e.message);
     return res.status(500).json({ success: false, message: "Ban failed" });
   }
+});
+
+/** Ban status — frontend early check (device + optional JWT) */
+app.get("/security/ban-status", async (req, res) => {
+  let state = "ok";
+  try {
+    const device = String(req.query.device || "").slice(0, 64);
+    const byDev = await dbBanStateByDevice(device);
+    if (byDev) state = byDev;
+    if (state !== "banned") {
+      const token = bearerToken(req);
+      if (token) {
+        const decoded = decodeToken(token);
+        if (decoded && decoded.id) {
+          const b = await dbIsUserBanned(decoded.id);
+          if (b.banned) state = b.state;
+        }
+      }
+    }
+  } catch (e) {
+    state = "ok"; // fail-open
+  }
+  res.json({ success: true, state });
 });
 
 app.get("/verify", async (req, res) => {
