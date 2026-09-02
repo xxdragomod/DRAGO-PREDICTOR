@@ -1578,7 +1578,7 @@ async function handleTelegramMessage(msg) {
   }
 
   // /banlist — blocked/banned users ki list + UNLOCK/BAN buttons
-  if (lower === "/banlist" || lower === "/bans" || lower === "/blocked") {
+  if (lower === "/banlist" || lower === "/bans" || lower === "/blocked" || lower === "/blocklist") {
     const rows = await dbListBanned(20);
     if (!rows.length) {
       await tgReply(chatId, "✅ Koi blocked/banned user nahi hai.");
