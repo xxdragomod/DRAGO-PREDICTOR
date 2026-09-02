@@ -202,25 +202,42 @@ async function connectMongo() {
   col.banned_devices = db.collection("banned_devices");
 
   // Minimal indexes only (no bloat)
+  // safeIndex: agar purana index same name se alag options ke saath exist kare
+  // (IndexOptionsConflict) to use drop karke naya banata hai — deploy crash nahi.
+  async function safeIndex(c, spec, opts) {
+    const name =
+      (opts && opts.name) ||
+      Object.keys(spec)
+        .map((k) => k + "_1")
+        .join("_");
+    try {
+      await c.createIndex(spec, opts);
+    } catch (e) {
+      try {
+        await c.dropIndex(name);
+        await c.createIndex(spec, opts);
+      } catch (e2) {
+        console.warn("index skip:", name, e2.message);
+      }
+    }
+  }
   await Promise.all([
-    col.users.createIndex({ google_id: 1 }, { unique: true }),
-    col.users.createIndex({ id: 1 }, { unique: true }),
-    col.games.createIndex({ id: 1 }, { unique: true }),
-    col.games.createIndex({ sort_order: 1 }),
-    col.api_keys.createIndex({ key_hash: 1 }, { unique: true, sparse: true }),
-    col.api_keys.createIndex({ api_key: 1 }, { unique: true, sparse: true }),
-    col.api_keys.createIndex({ user_id: 1 }),
-    col.api_keys.createIndex({ id: 1 }, { unique: true }),
-    col.api_usage.createIndex(
+    safeIndex(col.users, { google_id: 1 }, { unique: true }),
+    safeIndex(col.users, { id: 1 }, { unique: true }),
+    safeIndex(col.games, { id: 1 }, { unique: true }),
+    safeIndex(col.games, { sort_order: 1 }),
+    safeIndex(col.api_keys, { key_hash: 1 }, { unique: true, sparse: true }),
+    safeIndex(col.api_keys, { api_key: 1 }, { unique: true, sparse: true }),
+    safeIndex(col.api_keys, { user_id: 1 }),
+    safeIndex(col.api_keys, { id: 1 }, { unique: true }),
+    safeIndex(
+      col.api_usage,
       { api_key_id: 1, endpoint: 1, day: 1 },
       { unique: true }
     ),
-    col.api_usage.createIndex({ user_id: 1, day: 1 }),
+    safeIndex(col.api_usage, { user_id: 1, day: 1 }),
     // TTL on expire_at Date → auto-purge usage older than ~90 days
-    col.api_usage.createIndex(
-      { expire_at: 1 },
-      { expireAfterSeconds: 0 }
-    ),
+    safeIndex(col.api_usage, { expire_at: 1 }, { expireAfterSeconds: 0 }),
   ]);
   console.log("✅ MongoDB connected");
   return db;
