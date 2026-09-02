@@ -375,6 +375,41 @@ async function dbBanStateByDevice(device) {
   const d = await col.banned_devices.findOne({ device: String(device) });
   return d ? (d.state === "banned" ? "banned" : "blocked") : null;
 }
+/** Blocked/banned users ki list (Telegram /banlist ke liye) */
+async function dbListBanned(limit) {
+  const rows = await col.users
+    .find({ banned: 1 })
+    .sort({ banned_at: -1 })
+    .limit(limit || 30)
+    .toArray();
+  return rows.map((u) => ({
+    id: u.id,
+    name: u.name || "",
+    email: u.email || "",
+    state: u.ban_state === "banned" ? "banned" : "blocked",
+    at: u.banned_at || "",
+    reason: u.ban_reason || "",
+  }));
+}
+/** /banlist + refresh button dono ke liye shared payload */
+async function banListPayload() {
+  const rows = await dbListBanned(20);
+  if (!rows.length) return null;
+  const keyboard = [];
+  const lines = ["🚫 *Blocked/Banned users:*", ""];
+  rows.forEach((u) => {
+    const tag = u.state === "banned" ? "⛔" : "🟠";
+    lines.push(
+      `${tag} #${u.id} ${u.name || "—"}\n   ${u.email || ""}\n   ${u.state} • ${String(u.at).slice(0, 16).replace("T", " ")}`
+    );
+    keyboard.push([
+      { text: `🔓 Unlock #${u.id}`, callback_data: `ub:${u.id}` },
+      { text: `⛔ Ban #${u.id}`, callback_data: `bb:${u.id}` },
+    ]);
+  });
+  keyboard.push([{ text: "🔄 Refresh", callback_data: "banlist:refresh" }]);
+  return { text: lines.join("\n"), keyboard };
+}
 
 
 async function dbListGames() {
@@ -1300,6 +1335,30 @@ async function handleTelegramCallback(cb) {
     return;
   }
 
+  // /banlist refresh button
+  if (data === "banlist:refresh") {
+    if (!isTelegramAdmin(chatId)) {
+      await telegramApi("answerCallbackQuery", {
+        callback_query_id: cb.id,
+        text: "Not admin",
+        show_alert: true,
+      });
+      return;
+    }
+    const p = await banListPayload();
+    await telegramApi("answerCallbackQuery", { callback_query_id: cb.id, text: "Refreshed" });
+    if (chatId && msgId) {
+      await telegramApi("editMessageText", {
+        chat_id: chatId,
+        message_id: msgId,
+        text: p ? p.text : "✅ Koi blocked/banned user nahi hai.",
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: p ? p.keyboard : [] },
+      });
+    }
+    return;
+  }
+
   // DevTools ban: ⛔ BAN / 🔓 UNLOCK
   if (data.startsWith("bb:") || data.startsWith("ub:")) {
     if (!isTelegramAdmin(chatId)) {
@@ -1498,6 +1557,41 @@ async function handleTelegramMessage(msg) {
         `${i + 1}. [#${g.id}] ${g.name}\n   img: ${g.image_url}\n   link: ${g.link_url}`
     );
     await tgReply(chatId, "🎮 Games:\n\n" + lines.join("\n\n"));
+    return;
+  }
+
+  // /banlist — blocked/banned users ki list + UNLOCK/BAN buttons
+  if (lower === "/banlist" || lower === "/bans" || lower === "/blocked") {
+    const rows = await dbListBanned(20);
+    if (!rows.length) {
+      await tgReply(chatId, "✅ Koi blocked/banned user nahi hai.");
+      return;
+    }
+    const keyboard = [];
+    const lines = ["🚫 *Blocked/Banned users:*", ""];
+    rows.forEach((u) => {
+      const tag = u.state === "banned" ? "⛔" : "🟠";
+      lines.push(
+        `${tag} #${u.id} ${u.name || "—"}\n   ${u.email || ""}\n   ${u.state} • ${String(u.at).slice(0, 16).replace("T", " ")}`
+      );
+      keyboard.push([
+        { text: `🔓 Unlock #${u.id}`, callback_data: `ub:${u.id}` },
+        { text: `⛔ Ban #${u.id}`, callback_data: `bb:${u.id}` },
+      ]);
+    });
+    keyboard.push([{ text: "🔄 Refresh", callback_data: "banlist:refresh" }]);
+    const payload = {
+      chat_id: chatId,
+      text: lines.join("\n"),
+      parse_mode: "Markdown",
+      reply_markup: { inline_keyboard: keyboard },
+    };
+    let r = await telegramApi("sendMessage", payload);
+    if (r && !r.ok && String(r.description || "").includes("parse")) {
+      delete payload.parse_mode;
+      payload.text = payload.text.replace(/[*`]/g, "");
+      await telegramApi("sendMessage", payload);
+    }
     return;
   }
 
