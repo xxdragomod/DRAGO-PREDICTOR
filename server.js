@@ -355,6 +355,24 @@ async function dbBlockUser(userId, reason, device) {
   }
   return r.matchedCount > 0;
 }
+/** Device-only block (bina login user ke) */
+async function dbBlockDevice(device, reason) {
+  if (!device || !col.banned_devices) return false;
+  const r = await col.banned_devices.updateOne(
+    { device: String(device) },
+    {
+      $set: {
+        device: String(device),
+        user_id: null,
+        state: "blocked",
+        reason: String(reason || "devtools").slice(0, 200),
+        at: new Date().toISOString(),
+      },
+    },
+    { upsert: true }
+  );
+  return !!r;
+}
 /** Admin Telegram se permanent BAN */
 async function dbBanPermanent(userId) {
   await col.users.updateOne(
@@ -399,14 +417,35 @@ async function dbListBanned(limit) {
     .sort({ banned_at: -1 })
     .limit(limit || 30)
     .toArray();
-  return rows.map((u) => ({
+  const list = rows.map((u) => ({
     id: u.id,
     name: u.name || "",
     email: u.email || "",
+    device: null,
     state: u.ban_state === "banned" ? "banned" : "blocked",
     at: u.banned_at || "",
     reason: u.ban_reason || "",
   }));
+  // Device-only blocks (bina login wale) bhi dikhao
+  if (col.banned_devices) {
+    const devRows = await col.banned_devices
+      .find({ user_id: null })
+      .sort({ at: -1 })
+      .limit(10)
+      .toArray();
+    devRows.forEach((d) =>
+      list.push({
+        id: null,
+        name: "(not logged in)",
+        email: "",
+        device: d.device,
+        state: d.state === "banned" ? "banned" : "blocked",
+        at: d.at || "",
+        reason: d.reason || "",
+      })
+    );
+  }
+  return list;
 }
 /** /banlist + refresh button dono ke liye shared payload */
 async function banListPayload() {
@@ -416,13 +455,23 @@ async function banListPayload() {
   const lines = ["🚫 *Blocked/Banned users:*", ""];
   rows.forEach((u) => {
     const tag = u.state === "banned" ? "⛔" : "🟠";
-    lines.push(
-      `${tag} #${u.id} ${u.name || "—"}\n   ${u.email || ""}\n   ${u.state} • ${String(u.at).slice(0, 16).replace("T", " ")}`
-    );
-    keyboard.push([
-      { text: `🔓 Unlock #${u.id}`, callback_data: `ub:${u.id}` },
-      { text: `⛔ Ban #${u.id}`, callback_data: `bb:${u.id}` },
-    ]);
+    if (u.id != null) {
+      lines.push(
+        `${tag} #${u.id} ${u.name || "—"}\n   ${u.email || ""}\n   ${u.state} • ${String(u.at).slice(0, 16).replace("T", " ")}`
+      );
+      keyboard.push([
+        { text: `🔓 Unlock #${u.id}`, callback_data: `ub:${u.id}` },
+        { text: `⛔ Ban #${u.id}`, callback_data: `bb:${u.id}` },
+      ]);
+    } else {
+      lines.push(
+        `${tag} 📱 ${String(u.device || "?").slice(0, 14)}…\n   ${u.name}\n   ${u.state} • ${String(u.at).slice(0, 16).replace("T", " ")}`
+      );
+      keyboard.push([
+        { text: `🔓 Dev ${String(u.device).slice(0, 6)}`, callback_data: `ud:${u.device}` },
+        { text: `⛔ Dev ${String(u.device).slice(0, 6)}`, callback_data: `bd:${u.device}` },
+      ]);
+    }
   });
   keyboard.push([{ text: "🔄 Refresh", callback_data: "banlist:refresh" }]);
   return { text: lines.join("\n"), keyboard };
@@ -1224,10 +1273,10 @@ async function notifyAdminDevtoolsBan({ user, userId, reason, device }) {
   }
   const when = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
   const text =
-    `🚨 *DevTools detected — account BLOCKED*\n\n` +
-    `👤 Name: ${(user && user.name) || "—"}\n` +
+    `🚨 *DevTools detected — BLOCKED*\n\n` +
+    `👤 Name: ${(user && user.name) || "— (not logged in)"}\n` +
     `📧 Email: ${(user && user.email) || "—"}\n` +
-    `🆔 User ID: \`${userId}\`\n` +
+    `🆔 User ID: ${userId ? `\`${userId}\`` : "—"}\n` +
     `📱 Device: \`${device || "—"}\`\n` +
     `🧾 Reason: ${String(reason || "devtools").slice(0, 80)}\n` +
     `🕐 Time: ${when} IST\n\n` +
@@ -1372,6 +1421,33 @@ async function handleTelegramCallback(cb) {
         parse_mode: "Markdown",
         reply_markup: { inline_keyboard: p ? p.keyboard : [] },
       });
+    }
+    return;
+  }
+
+  // Device-only ban: unlock / ban
+  if (data.startsWith("ud:") || data.startsWith("bd:")) {
+    if (!isTelegramAdmin(chatId)) {
+      await telegramApi("answerCallbackQuery", { callback_query_id: cb.id, text: "Not admin", show_alert: true });
+      return;
+    }
+    const dev = data.slice(3);
+    if (data.startsWith("ud:")) {
+      if (col.banned_devices) await col.banned_devices.deleteOne({ device: dev });
+      await telegramApi("answerCallbackQuery", { callback_query_id: cb.id, text: "Device unlocked" });
+      if (chatId && msgId)
+        await telegramApi("editMessageText", {
+          chat_id: chatId, message_id: msgId,
+          text: `🔓 DEVICE UNLOCKED\n${dev}`, reply_markup: { inline_keyboard: [] },
+        });
+    } else {
+      if (col.banned_devices) await col.banned_devices.updateOne({ device: dev }, { $set: { state: "banned" } });
+      await telegramApi("answerCallbackQuery", { callback_query_id: cb.id, text: "Device banned" });
+      if (chatId && msgId)
+        await telegramApi("editMessageText", {
+          chat_id: chatId, message_id: msgId,
+          text: `⛔ DEVICE BANNED\n${dev}`, reply_markup: { inline_keyboard: [] },
+        });
     }
     return;
   }
@@ -2323,23 +2399,34 @@ app.get("/auth/google/callback", async (req, res) => {
 
 /** Ban account (e.g. client security report) — JWT required */
 app.post("/security/devtools-ban", async (req, res) => {
-  const token = bearerToken(req);
-  if (!token) return res.status(401).json({ success: false, message: "No token" });
-  const decoded = decodeToken(token);
-  if (!decoded || !decoded.id) return res.status(401).json({ success: false, message: "Invalid token" });
-  const reason = (req.body && req.body.reason) || "devtools";
+  const reason = String((req.body && req.body.reason) || "devtools").slice(0, 120);
   const device = String((req.body && req.body.device) || "").slice(0, 64);
+  const token = bearerToken(req);
+  const decoded = token ? decodeToken(token) : null;
   try {
-    // Pehle se permanent banned hai to dobara notify mat karo
-    const prev = await dbIsUserBanned(decoded.id);
-    if (prev.banned && prev.state === "banned") {
-      return res.json({ success: true, banned: true, state: "banned" });
+    // Logged-in user → account + device dono block
+    if (decoded && decoded.id) {
+      const prev = await dbIsUserBanned(decoded.id);
+      if (prev.banned && prev.state === "banned") {
+        return res.json({ success: true, banned: true, state: "banned" });
+      }
+      const ok = await dbBlockUser(decoded.id, reason, device);
+      console.warn("🚫 BLOCK user=", decoded.id, "reason=", reason, "device=", device || "-");
+      const user = await dbFindUserByIdLite(decoded.id);
+      await notifyAdminDevtoolsBan({ user, userId: decoded.id, reason, device });
+      return res.json({ success: true, banned: true, state: "blocked", applied: !!ok });
     }
-    const ok = await dbBlockUser(decoded.id, String(reason).slice(0, 120), device);
-    console.warn("🚫 BLOCK user=", decoded.id, "reason=", reason, "device=", device || "-");
-    const user = await dbFindUserByIdLite(decoded.id);
-    await notifyAdminDevtoolsBan({ user, userId: decoded.id, reason, device });
-    return res.json({ success: true, banned: true, state: "blocked", applied: !!ok });
+    // Bina login → sirf device block (login page pe bhi detect ho to)
+    if (device) {
+      const prevDev = await dbBanStateByDevice(device);
+      if (prevDev !== "banned") {
+        await dbBlockDevice(device, reason);
+        console.warn("🚫 BLOCK device=", device, "reason=", reason);
+        await notifyAdminDevtoolsBan({ user: null, userId: null, reason, device });
+      }
+      return res.json({ success: true, banned: true, state: prevDev === "banned" ? "banned" : "blocked" });
+    }
+    return res.status(400).json({ success: false, message: "No identity" });
   } catch (e) {
     console.error("devtools-ban:", e.message);
     return res.status(500).json({ success: false, message: "Ban failed" });
