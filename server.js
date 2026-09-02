@@ -1281,17 +1281,23 @@ async function notifyAdminDevtoolsBan({ user, userId, reason, device }) {
     `🧾 Reason: ${String(reason || "devtools").slice(0, 80)}\n` +
     `🕐 Time: ${when} IST\n\n` +
     `UNLOCK → user wapas app use kar payega\nBAN → permanent ban (site hamesha 404 dikhegi)`;
+  // Logged-in → user buttons; device-only → device buttons (warna "bad user id")
+  const hasUser = userId != null && userId !== "";
+  const btnRow = hasUser
+    ? [
+        { text: "⛔ BAN Permanent", callback_data: `bb:${userId}` },
+        { text: "🔓 UNLOCK", callback_data: `ub:${userId}` },
+      ]
+    : [
+        { text: "⛔ BAN Device", callback_data: `bd:${device}` },
+        { text: "🔓 UNLOCK Device", callback_data: `ud:${device}` },
+      ];
   const payload = {
     chat_id: TELEGRAM_ADMIN_CHAT_ID,
     text,
     parse_mode: "Markdown",
     reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "⛔ BAN Permanent", callback_data: `bb:${userId}` },
-          { text: "🔓 UNLOCK", callback_data: `ub:${userId}` },
-        ],
-      ],
+      inline_keyboard: [btnRow],
     },
   };
   let result = await telegramApi("sendMessage", payload);
