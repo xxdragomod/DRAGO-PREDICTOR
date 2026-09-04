@@ -3641,6 +3641,76 @@ app.get("/v1/wingo30s/prediction", async (req, res) => {
 });
 
 /**
+ * AutoBet bookmarklet prediction (API key required, ANY pro plan)
+ * GET /v1/autobet/predict
+ * Auth: header X-API-Key OR ?api_key=
+ * - RX1 FOR PROFIT (₹900): unlimited
+ * - other pro plans: 30 predictions/day
+ * - free: 403
+ */
+app.get("/v1/autobet/predict", async (req, res) => {
+  const auth = await requireApiKey(req, res, "autobet");
+  if (!auth) return;
+
+  try {
+    const ban = await dbIsUserBanned(auth.row.user_id);
+    if (ban.banned) {
+      return res.status(403).json({
+        success: false,
+        banned: true,
+        message: "Account suspended due to security policy violation.",
+      });
+    }
+  } catch (e) {
+    console.warn("autobet ban-check:", e.message);
+  }
+
+  const user = await dbFindUserById(auth.row.user_id);
+  const planKey = user && user.pro_plan ? String(user.pro_plan) : "";
+  if (auth.isPro && planKey !== "profit") {
+    const AUTOBET_DAILY_LIMIT = 30;
+    let used = 0;
+    try {
+      used =
+        Number(
+          usageMap(await dbUsageByKeyToday(auth.row.id, todayKey())).autobet
+        ) || 0;
+    } catch (e) {
+      console.warn("autobet quota read:", e.message);
+    }
+    if (used >= AUTOBET_DAILY_LIMIT) {
+      return res.status(402).json({
+        success: false,
+        message:
+          "Daily auto-bet limit reached (30/day). RX1 FOR PROFIT (₹900) plan me unlimited hai.",
+        billing_required: true,
+        used,
+        limit: AUTOBET_DAILY_LIMIT,
+      });
+    }
+    res.setHeader("X-AutoBet-Remaining", String(AUTOBET_DAILY_LIMIT - used - 1));
+  }
+
+  try {
+    const prediction = await fetchWingoPrediction();
+    const pred =
+      prediction && typeof prediction === "object" ? prediction : {};
+    res.json({ success: true, Server: SERVER_BRAND, data: pred });
+  } catch (err) {
+    console.error("v1 autobet predict:", err.message);
+    const status = err.status || 502;
+    res.status(status).json({
+      success: false,
+      Server: SERVER_BRAND,
+      message:
+        status === 503
+          ? "Prediction source not configured"
+          : "Failed to fetch prediction from source",
+    });
+  }
+});
+
+/**
  * Check order status (Rupayex + local DB)
  * Query: ?order_id=xxx
  * Auth: Bearer JWT required (own orders only)
