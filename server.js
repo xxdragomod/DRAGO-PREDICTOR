@@ -168,6 +168,38 @@ function maskApiKeyPrefix(prefix) {
   const p = String(prefix || "drago_");
   return p + "…" + "****";
 }
+/** Full API key at-rest encryption (AES-256-GCM, APP_SECRET derived) — user can copy key anytime. */
+function encKey(raw) {
+  try {
+    const iv = crypto.randomBytes(12);
+    const k = Buffer.from(String(APP_SECRET).slice(0, 32).padEnd(32, "0"));
+    const c = crypto.createCipheriv("aes-256-gcm", k, iv);
+    let e = c.update(String(raw), "utf8");
+    e = Buffer.concat([e, c.final()]);
+    return (
+      iv.toString("base64") +
+      "." +
+      c.getAuthTag().toString("base64") +
+      "." +
+      e.toString("base64")
+    );
+  } catch (_) {
+    return null;
+  }
+}
+function decKey(s) {
+  try {
+    const [i, t, e] = String(s || "").split(".");
+    const k = Buffer.from(String(APP_SECRET).slice(0, 32).padEnd(32, "0"));
+    const d = crypto.createDecipheriv("aes-256-gcm", k, Buffer.from(i, "base64"));
+    d.setAuthTag(Buffer.from(t, "base64"));
+    let p = d.update(e, "base64");
+    p = Buffer.concat([p, d.final()]);
+    return p.toString("utf8");
+  } catch (_) {
+    return null;
+  }
+}
 function mapApiKey(doc) {
   if (!doc) return null;
   const prefix =
@@ -178,6 +210,7 @@ function mapApiKey(doc) {
     user_id: doc.user_id,
     key_prefix: prefix,
     api_key_masked: maskApiKeyPrefix(prefix),
+    key_enc: doc.key_enc || null,
     name: doc.name || "default",
     created_at: doc.created_at || null,
     last_used_at: doc.last_used_at || null,
@@ -524,6 +557,7 @@ async function dbInsertApiKey(userId, apiKey, name) {
     user_id: Number(userId),
     key_hash: keyHash,
     key_prefix: keyPrefix,
+    key_enc: encKey(apiKey),
     name: name || "default",
     created_at: new Date().toISOString(),
     last_used_at: null,
@@ -655,6 +689,7 @@ const DEFAULT_ADMIN_SETTINGS = {
   google_auth_enabled: true,
   auto_payment_enabled: true, // Rupayex gateway
   manual_payment_enabled: true, // QR + UTR
+  guard_enabled: true, // DevTools detect/block (frontend guard)
   free_pred_limit: 3,
   free_api_history_limit: 10,
 };
@@ -1337,6 +1372,8 @@ async function handleTelegramCallback(cb) {
       adminSettings.auto_payment_enabled = !adminSettings.auto_payment_enabled;
     } else if (key === "manual") {
       adminSettings.manual_payment_enabled = !adminSettings.manual_payment_enabled;
+    } else if (key === "guard") {
+      adminSettings.guard_enabled = !adminSettings.guard_enabled;
     } else if (key === "pred" && arg != null) {
       const delta = Number(arg) || 0;
       adminSettings.free_pred_limit = Math.max(
@@ -1396,6 +1433,14 @@ async function handleTelegramCallback(cb) {
               { text: "Hist −5", callback_data: "cfg:hist:-5" },
               { text: "Hist +5", callback_data: "cfg:hist:5" },
               { text: "Hist +10", callback_data: "cfg:hist:10" },
+            ],
+            [
+              {
+                text: s.guard_enabled
+                  ? "🔴 Disable DevTools Guard"
+                  : "🟢 Enable DevTools Guard",
+                callback_data: "cfg:guard",
+              },
             ],
             [{ text: "🔄 Refresh", callback_data: "cfg:refresh" }],
           ],
@@ -1827,6 +1872,7 @@ function adminPanelText() {
     "Google Auth: " + on(s.google_auth_enabled) + "\n" +
     "Auto Payment (Rupayex): " + on(s.auto_payment_enabled) + "\n" +
     "Manual QR Payment: " + on(s.manual_payment_enabled) + "\n" +
+    "DevTools Guard: " + on(s.guard_enabled) + "\n" +
     "Free predictions: " + s.free_pred_limit + "\n" +
     "Free API history fetches: " + s.free_api_history_limit + "\n\n" +
     "Commands:\n" +
@@ -1869,6 +1915,14 @@ async function sendAdminPanel(chatId) {
           { text: "Hist −5", callback_data: "cfg:hist:-5" },
           { text: "Hist +5", callback_data: "cfg:hist:5" },
           { text: "Hist +10", callback_data: "cfg:hist:10" },
+        ],
+        [
+          {
+            text: s.guard_enabled
+              ? "🔴 Disable DevTools Guard"
+              : "🟢 Enable DevTools Guard",
+            callback_data: "cfg:guard",
+          },
         ],
         [{ text: "🔄 Refresh", callback_data: "cfg:refresh" }],
       ],
@@ -3456,6 +3510,7 @@ app.get("/api-keys", async (req, res) => {
       id: r.id,
       key_prefix: r.key_prefix,
       api_key_masked: r.api_key_masked,
+      api_key_full: r.key_enc ? decKey(r.key_enc) : null,
       name: r.name || "default",
       created_at: r.created_at,
       last_used_at: r.last_used_at || null,
@@ -3642,6 +3697,11 @@ app.get("/v1/wingo30s/prediction", async (req, res) => {
           : "Failed to fetch prediction from source",
     });
   }
+});
+
+/** Public: frontend guard reads this to honour Telegram on/off toggle. */
+app.get("/guard-status", (req, res) => {
+  res.json({ success: true, enabled: adminSettings.guard_enabled !== false });
 });
 
 /** Widget signature: djb2(secret|key|30s-bucket) — casual curl/scripting blocks. */
