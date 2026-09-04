@@ -2227,7 +2227,7 @@ app.use("/v1", (req, res, next) => {
   );
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-API-Key, x-api-key, Accept, Origin"
+    "Content-Type, Authorization, X-API-Key, x-api-key, Accept, Origin, X-ABP-Ts, X-ABP-Sig, x-abp-ts, x-abp-sig"
   );
   res.setHeader(
     "Access-Control-Expose-Headers",
@@ -3640,18 +3640,70 @@ app.get("/v1/wingo30s/prediction", async (req, res) => {
   }
 });
 
+/** Widget signature: djb2(secret|key|30s-bucket) — casual curl/scripting blocks. */
+const ABP_WIDGET_SIG_SECRET =
+  process.env.ABP_SIG_SECRET || "DRAGO_ABP_SIG_7f3k9q";
+function abpWidgetSig(apiKey, bucket) {
+  const str = ABP_WIDGET_SIG_SECRET + "|" + apiKey + "|" + bucket;
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(16);
+}
+
 /**
- * AutoBet widget prediction (API key required, ANY pro plan, UNLIMITED)
+ * AutoBet widget prediction (API key + widget signature + ₹500+ plan)
  * GET /v1/autobet/predict
- * Auth: header X-API-Key OR ?api_key=
- * - any pro plan: unlimited (widget endpoint; pro rate-limit 20 req/min applies)
- * - free: 403
+ * Auth: header X-API-Key OR ?api_key=  AND  X-ABP-Ts + X-ABP-Sig (widget only)
+ * - plans ₹500+ (beginners/profit): unlimited
+ * - ₹300 test plan / free: 403
  * NOTE: raw/developer prediction API (/v1/wingo30s/prediction) remains
  * RX1 FOR PROFIT (₹900) only — normal pro cannot fetch predictions via API.
  */
 app.get("/v1/autobet/predict", async (req, res) => {
   const auth = await requireApiKey(req, res, "autobet");
   if (!auth) return;
+
+  // ── Widget signature check (time-bound 30s buckets, ±2 skew) ──
+  const rawKey = String(
+    req.headers["x-api-key"] || req.query.api_key || ""
+  ).trim();
+  const ts = Number(req.headers["x-abp-ts"] || 0);
+  const sig = String(req.headers["x-abp-sig"] || "").toLowerCase();
+  const nowB = Math.floor(Date.now() / 30000);
+  let sigOk = false;
+  if (ts && sig) {
+    for (let b = nowB - 2; b <= nowB + 2; b++) {
+      if (abpWidgetSig(rawKey, b) === sig) {
+        sigOk = true;
+        break;
+      }
+    }
+  }
+  if (!sigOk) {
+    return res.status(401).json({
+      success: false,
+      message: "Widget verification failed — Auto Bet Pro extension required.",
+    });
+  }
+
+  // ── Plan gate: Auto Bet = ₹500+ plans only ──
+  const abUser = await dbFindUserById(auth.row.user_id);
+  const planAmt =
+    abUser && abUser.pro_plan && PLAN_CATALOG[abUser.pro_plan]
+      ? PLAN_CATALOG[abUser.pro_plan].amount
+      : 0;
+  if (planAmt < 500) {
+    return res.status(403).json({
+      success: false,
+      billing_required: true,
+      message:
+        "Auto Bet ₹500+ plan (RX1 FOR BEGINNERS / RX1 FOR PROFIT) me available hai. Upgrade karo.",
+      plan: abUser && abUser.pro_plan ? String(abUser.pro_plan) : "free",
+      required_min_amount: 500,
+    });
+  }
 
   try {
     const ban = await dbIsUserBanned(auth.row.user_id);
