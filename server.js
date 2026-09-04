@@ -2206,6 +2206,10 @@ app.use(
       "X-Client-Domain",
       "X-User-Id",
       "X-User-Name",
+      "X-ABP-Ts",
+      "X-ABP-Sig",
+      "x-abp-ts",
+      "x-abp-sig",
     ],
     exposedHeaders: [
       "X-RateLimit-Limit",
