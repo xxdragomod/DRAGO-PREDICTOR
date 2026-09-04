@@ -3641,12 +3641,13 @@ app.get("/v1/wingo30s/prediction", async (req, res) => {
 });
 
 /**
- * AutoBet bookmarklet prediction (API key required, ANY pro plan)
+ * AutoBet widget prediction (API key required, ANY pro plan, UNLIMITED)
  * GET /v1/autobet/predict
  * Auth: header X-API-Key OR ?api_key=
- * - RX1 FOR PROFIT (₹900): unlimited
- * - other pro plans: 30 predictions/day
+ * - any pro plan: unlimited (widget endpoint; pro rate-limit 20 req/min applies)
  * - free: 403
+ * NOTE: raw/developer prediction API (/v1/wingo30s/prediction) remains
+ * RX1 FOR PROFIT (₹900) only — normal pro cannot fetch predictions via API.
  */
 app.get("/v1/autobet/predict", async (req, res) => {
   const auth = await requireApiKey(req, res, "autobet");
@@ -3665,31 +3666,8 @@ app.get("/v1/autobet/predict", async (req, res) => {
     console.warn("autobet ban-check:", e.message);
   }
 
-  const user = await dbFindUserById(auth.row.user_id);
-  const planKey = user && user.pro_plan ? String(user.pro_plan) : "";
-  if (auth.isPro && planKey !== "profit") {
-    const AUTOBET_DAILY_LIMIT = 30;
-    let used = 0;
-    try {
-      used =
-        Number(
-          usageMap(await dbUsageByKeyToday(auth.row.id, todayKey())).autobet
-        ) || 0;
-    } catch (e) {
-      console.warn("autobet quota read:", e.message);
-    }
-    if (used >= AUTOBET_DAILY_LIMIT) {
-      return res.status(402).json({
-        success: false,
-        message:
-          "Daily auto-bet limit reached (30/day). RX1 FOR PROFIT (₹900) plan me unlimited hai.",
-        billing_required: true,
-        used,
-        limit: AUTOBET_DAILY_LIMIT,
-      });
-    }
-    res.setHeader("X-AutoBet-Remaining", String(AUTOBET_DAILY_LIMIT - used - 1));
-  }
+  // ANY pro plan = unlimited auto-bet predictions (widget endpoint).
+  // Pro rate-limit (20 req/min) from requireApiKey still applies.
 
   try {
     const prediction = await fetchWingoPrediction();
