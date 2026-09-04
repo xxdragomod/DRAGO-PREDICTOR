@@ -3673,8 +3673,10 @@ app.get("/v1/autobet/predict", async (req, res) => {
   const rawKey = String(
     req.headers["x-api-key"] || req.query.api_key || ""
   ).trim();
-  const ts = Number(req.headers["x-abp-ts"] || 0);
-  const sig = String(req.headers["x-abp-sig"] || "").toLowerCase();
+  const ts = Number(req.headers["x-abp-ts"] || req.query.abp_ts || 0);
+  const sig = String(
+    req.headers["x-abp-sig"] || req.query.abp_sig || ""
+  ).toLowerCase();
   const nowB = Math.floor(Date.now() / 30000);
   let sigOk = false;
   if (ts && sig) {
