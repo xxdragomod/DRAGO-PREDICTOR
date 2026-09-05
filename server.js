@@ -2795,7 +2795,7 @@ app.post("/create-payment", async (req, res) => {
   }
 
   const orderId = `DRAGO${Date.now()}${crypto.randomBytes(3).toString("hex")}`;
-  const redirectUrl = `${FRONTEND_URL}/subscription.html?order=${encodeURIComponent(orderId)}`;
+  const redirectUrl = `${FRONTEND_URL}/subscription?order=${encodeURIComponent(orderId)}`;
 
   const form = new URLSearchParams();
   form.set("amount", String(plan.amount));
