@@ -76,7 +76,18 @@ const PLAN_CATALOG = {
   },
 };
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+// Naya bot = ADMIN bot (payments approve, panel, stats).
+// Purana bot (Render env TELEGRAM_BOT_TOKEN) = GROUP bot (bug reports group me bhejta hai).
+const TELEGRAM_BOT_TOKEN =
+  process.env.TELEGRAM_ADMIN_BOT_TOKEN ||
+  "8949315045:AAFWg_41gExZnrK439e7B_dnvQ_AlCTmPYc";
+const TELEGRAM_GROUP_BOT_TOKEN =
+  process.env.TELEGRAM_GROUP_BOT_TOKEN ||
+  process.env.TELEGRAM_BOT_TOKEN ||
+  TELEGRAM_BOT_TOKEN;
+const TELEGRAM_REPORT_GROUP_ID = String(
+  process.env.TELEGRAM_REPORT_GROUP_ID || "-1004386088906"
+);
 const TELEGRAM_ADMIN_CHAT_ID = String(
   process.env.TELEGRAM_ADMIN_CHAT_ID || ""
 ).trim();
@@ -1232,9 +1243,10 @@ async function activatePro(userId, planKey) {
   return { plan: planKey, pro_expires_at: expires, days: plan.days };
 }
 
-async function telegramApi(method, body) {
-  if (!TELEGRAM_BOT_TOKEN) return null;
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`;
+async function telegramApi(method, body, token) {
+  const tk = token || TELEGRAM_BOT_TOKEN;
+  if (!tk) return null;
+  const url = `https://api.telegram.org/bot${tk}/${method}`;
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -1347,6 +1359,24 @@ async function notifyAdminDevtoolsBan({ user, userId, reason, device }) {
 }
 
 /** Shared Approve / Deny handler (webhook + polling) */
+/** Bug report → Telegram group (group bot bhejta hai; fallback admin bot) */
+async function sendBugReportToGroup(report) {
+  const text =
+    `🐞 *Bug Report — DRAGO Predictor*\n\n` +
+    `👤 User: ${report.name} (#${report.userId})\n` +
+    `🧩 Area: ${report.category}\n` +
+    `📝 Issue: ${report.description}`;
+  const payload = {
+    chat_id: TELEGRAM_REPORT_GROUP_ID,
+    text,
+    parse_mode: "Markdown",
+    disable_web_page_preview: true,
+  };
+  let r = await telegramApi("sendMessage", payload, TELEGRAM_GROUP_BOT_TOKEN);
+  if (!r || !r.ok) r = await telegramApi("sendMessage", payload);
+  return r;
+}
+
 async function handleTelegramCallback(cb) {
   if (!cb || !cb.data) return;
   const data = String(cb.data);
@@ -1554,6 +1584,14 @@ async function handleTelegramCallback(cb) {
 
   let action = null;
   let orderId = null;
+  if (data === "stats:refresh") {
+    await telegramApi("answerCallbackQuery", {
+      callback_query_id: cb.id,
+      text: "Refreshed",
+    });
+    await sendAdminPanel(chatId);
+    return;
+  }
   if (data.startsWith("a:")) {
     action = "approve";
     orderId = data.slice(2);
@@ -1885,11 +1923,43 @@ function adminPanelText() {
 
 async function sendAdminPanel(chatId) {
   const s = adminSettings;
+  let totalUsers = 0,
+    proUsers = 0,
+    todayUsers = 0;
+  try {
+    totalUsers = await col.users.countDocuments({});
+    proUsers = await col.users.countDocuments({ is_pro: 1 });
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+    todayUsers = await col.users.countDocuments({
+      created_at: { $gte: dayStart.toISOString() },
+    });
+  } catch (e) {}
+  const stats =
+    "📊 Total users: " +
+    totalUsers +
+    " | Pro: " +
+    proUsers +
+    " | Aaj naye: " +
+    todayUsers +
+    "\n\n";
   await telegramApi("sendMessage", {
     chat_id: chatId,
-    text: adminPanelText(),
+    text: "🐉 DRAGO Admin Panel\n\n" + stats + adminPanelText().replace("🐉 DRAGO Admin Panel\n\n", ""),
     reply_markup: {
       inline_keyboard: [
+        [
+          {
+            text:
+              "📊 Users: " +
+              totalUsers +
+              " | Pro: " +
+              proUsers +
+              " | +Aaj: " +
+              todayUsers,
+            callback_data: "stats:refresh",
+          },
+        ],
         [
           {
             text: s.google_auth_enabled ? "🔴 Disable Google Auth" : "🟢 Enable Google Auth",
@@ -3811,6 +3881,33 @@ app.get("/v1/autobet/predict", async (req, res) => {
  * Query: ?order_id=xxx
  * Auth: Bearer JWT required (own orders only)
  */
+app.post("/bug-report", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  const category = String((req.body && req.body.category) || "")
+    .trim()
+    .slice(0, 60);
+  const description = String((req.body && req.body.description) || "")
+    .trim()
+    .slice(0, 1200);
+  if (!category || !description) {
+    return res
+      .status(400)
+      .json({ success: false, message: "category & description required" });
+  }
+  try {
+    await sendBugReportToGroup({
+      userId: decoded.id,
+      name: decoded.name || decoded.email || "User",
+      category,
+      description,
+    });
+  } catch (e) {
+    console.error("bug-report:", e.message);
+  }
+  res.json({ success: true });
+});
+
 app.get("/order-status", async (req, res) => {
   const decoded = authUser(req, res);
   if (!decoded) return;
