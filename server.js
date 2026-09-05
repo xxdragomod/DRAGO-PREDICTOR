@@ -701,6 +701,7 @@ const DEFAULT_ADMIN_SETTINGS = {
   auto_payment_enabled: true, // Rupayex gateway
   manual_payment_enabled: true, // QR + UTR
   guard_enabled: true, // DevTools detect/block (frontend guard)
+  force_feedback: false, // "Bug in app" ON → sab users ko popup har visit pe
   free_pred_limit: 3,
   free_api_history_limit: 10,
 };
@@ -1404,6 +1405,8 @@ async function handleTelegramCallback(cb) {
       adminSettings.manual_payment_enabled = !adminSettings.manual_payment_enabled;
     } else if (key === "guard") {
       adminSettings.guard_enabled = !adminSettings.guard_enabled;
+    } else if (key === "feedback") {
+      adminSettings.force_feedback = !adminSettings.force_feedback;
     } else if (key === "pred" && arg != null) {
       const delta = Number(arg) || 0;
       adminSettings.free_pred_limit = Math.max(
@@ -1470,6 +1473,12 @@ async function handleTelegramCallback(cb) {
                   ? "🔴 Disable DevTools Guard"
                   : "🟢 Enable DevTools Guard",
                 callback_data: "cfg:guard",
+              },
+            ],
+            [
+              {
+                text: s.force_feedback ? "🐞 Bug in app: ON" : "🐞 Bug in app: OFF",
+                callback_data: "cfg:feedback",
               },
             ],
             [{ text: "🔄 Refresh", callback_data: "cfg:refresh" }],
@@ -1992,6 +2001,12 @@ async function sendAdminPanel(chatId) {
               ? "🔴 Disable DevTools Guard"
               : "🟢 Enable DevTools Guard",
             callback_data: "cfg:guard",
+          },
+        ],
+        [
+          {
+            text: s.force_feedback ? "🐞 Bug in app: ON" : "🐞 Bug in app: OFF",
+            callback_data: "cfg:feedback",
           },
         ],
         [{ text: "🔄 Refresh", callback_data: "cfg:refresh" }],
@@ -3772,6 +3787,11 @@ app.get("/v1/wingo30s/prediction", async (req, res) => {
 /** Public: frontend guard reads this to honour Telegram on/off toggle. */
 app.get("/guard-status", (req, res) => {
   res.json({ success: true, enabled: adminSettings.guard_enabled !== false });
+});
+
+/** Public: feedback popup force mode ("Bug in app" admin toggle) */
+app.get("/feedback-status", (req, res) => {
+  res.json({ success: true, force: adminSettings.force_feedback === true });
 });
 
 /** Widget signature: djb2(secret|key|30s-bucket) — casual curl/scripting blocks. */
