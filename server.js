@@ -702,6 +702,8 @@ const DEFAULT_ADMIN_SETTINGS = {
   manual_payment_enabled: true, // QR + UTR
   guard_enabled: true, // DevTools detect/block (frontend guard)
   force_feedback: false, // "Bug in app" ON → sab users ko popup har visit pe
+  force_rate: false, // "Rate in app" ON → sab users ko rating popup
+  force_winfb: false, // "Feedback in app" ON → 20+ wins wale users ko feedback popup
   free_pred_limit: 3,
   free_api_history_limit: 10,
 };
@@ -1407,6 +1409,10 @@ async function handleTelegramCallback(cb) {
       adminSettings.guard_enabled = !adminSettings.guard_enabled;
     } else if (key === "feedback") {
       adminSettings.force_feedback = !adminSettings.force_feedback;
+    } else if (key === "rate") {
+      adminSettings.force_rate = !adminSettings.force_rate;
+    } else if (key === "winfb") {
+      adminSettings.force_winfb = !adminSettings.force_winfb;
     } else if (key === "pred" && arg != null) {
       const delta = Number(arg) || 0;
       adminSettings.free_pred_limit = Math.max(
@@ -1479,6 +1485,18 @@ async function handleTelegramCallback(cb) {
               {
                 text: s.force_feedback ? "🐞 Bug in app: ON" : "🐞 Bug in app: OFF",
                 callback_data: "cfg:feedback",
+              },
+            ],
+            [
+              {
+                text: s.force_rate ? "⭐ Rate in app: ON" : "⭐ Rate in app: OFF",
+                callback_data: "cfg:rate",
+              },
+            ],
+            [
+              {
+                text: s.force_winfb ? "🏆 Feedback in app: ON" : "🏆 Feedback in app: OFF",
+                callback_data: "cfg:winfb",
               },
             ],
             [{ text: "🔄 Refresh", callback_data: "cfg:refresh" }],
@@ -2007,6 +2025,18 @@ async function sendAdminPanel(chatId) {
           {
             text: s.force_feedback ? "🐞 Bug in app: ON" : "🐞 Bug in app: OFF",
             callback_data: "cfg:feedback",
+          },
+        ],
+        [
+          {
+            text: s.force_rate ? "⭐ Rate in app: ON" : "⭐ Rate in app: OFF",
+            callback_data: "cfg:rate",
+          },
+        ],
+        [
+          {
+            text: s.force_winfb ? "🏆 Feedback in app: ON" : "🏆 Feedback in app: OFF",
+            callback_data: "cfg:winfb",
           },
         ],
         [{ text: "🔄 Refresh", callback_data: "cfg:refresh" }],
@@ -3791,7 +3821,72 @@ app.get("/guard-status", (req, res) => {
 
 /** Public: feedback popup force mode ("Bug in app" admin toggle) */
 app.get("/feedback-status", (req, res) => {
-  res.json({ success: true, force: adminSettings.force_feedback === true });
+  res.json({
+    success: true,
+    force: adminSettings.force_feedback === true,
+    rate: adminSettings.force_rate === true,
+    winfb: adminSettings.force_winfb === true,
+  });
+});
+
+/** Rating (stars) → Telegram group */
+app.post("/rate-submit", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  const stars = Math.max(1, Math.min(5, Number((req.body && req.body.stars) || 0) | 0));
+  if (!stars) {
+    return res.status(400).json({ success: false, message: "stars required" });
+  }
+  const name = decoded.name || decoded.email || "User";
+  const text =
+    `⭐ *App Rating — DRAGO Predictor*\n\n` +
+    `👤 User: ${name} (#${decoded.id})\n` +
+    `⭐ Rating: ${"★".repeat(stars)}${"☆".repeat(5 - stars)} (${stars}/5)`;
+  const payload = {
+    chat_id: TELEGRAM_REPORT_GROUP_ID,
+    text,
+    parse_mode: "Markdown",
+  };
+  let r = await telegramApi("sendMessage", payload, TELEGRAM_GROUP_BOT_TOKEN);
+  if (!r || !r.ok) r = await telegramApi("sendMessage", payload);
+  res.json({ success: true });
+});
+
+/** Win feedback (screenshot + wins) → Telegram group */
+app.post("/win-feedback", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  const wins = Math.max(0, Number((req.body && req.body.wins) || 0) | 0);
+  const imageUrl = String((req.body && req.body.image_url) || "").trim().slice(0, 500);
+  const name = decoded.name || decoded.email || "User";
+  const caption =
+    `🏆 *Win Feedback — DRAGO Predictor*\n\n` +
+    `👤 User: ${name} (#${decoded.id})\n` +
+    `🎉 Wins: ${wins}\n` +
+    `📝 User ne 20+ wins ke baad feedback bheja hai.`;
+  let r = null;
+  if (imageUrl) {
+    r = await telegramApi(
+      "sendPhoto",
+      { chat_id: TELEGRAM_REPORT_GROUP_ID, photo: imageUrl, caption, parse_mode: "Markdown" },
+      TELEGRAM_GROUP_BOT_TOKEN
+    );
+    if (!r || !r.ok)
+      r = await telegramApi("sendPhoto", {
+        chat_id: TELEGRAM_REPORT_GROUP_ID,
+        photo: imageUrl,
+        caption,
+        parse_mode: "Markdown",
+      });
+  }
+  if (!r || !r.ok) {
+    r = await telegramApi(
+      "sendMessage",
+      { chat_id: TELEGRAM_REPORT_GROUP_ID, text: caption + (imageUrl ? `\n🔗 ${imageUrl}` : ""), parse_mode: "Markdown" },
+      TELEGRAM_GROUP_BOT_TOKEN
+    );
+  }
+  res.json({ success: true });
 });
 
 /** Widget signature: djb2(secret|key|30s-bucket) — casual curl/scripting blocks. */
