@@ -709,6 +709,25 @@ const DEFAULT_ADMIN_SETTINGS = {
 };
 let adminSettings = { ...DEFAULT_ADMIN_SETTINGS };
 
+/* ── Announcement broadcast (new game / feature popup) ── */
+const ANNOUNCE_PATH = path.join(__dirname, "announcement.json");
+let announcement = null;
+try {
+  if (fs.existsSync(ANNOUNCE_PATH)) {
+    announcement = JSON.parse(fs.readFileSync(ANNOUNCE_PATH, "utf8")) || null;
+  }
+} catch (e) {
+  announcement = null;
+}
+function saveAnnouncement(a) {
+  announcement = a;
+  try {
+    fs.writeFileSync(ANNOUNCE_PATH, JSON.stringify(a, null, 2), "utf8");
+  } catch (e) {
+    console.warn("announcement save:", e.message);
+  }
+}
+
 function loadAdminSettings() {
   try {
     if (fs.existsSync(ADMIN_SETTINGS_PATH)) {
@@ -1386,6 +1405,22 @@ async function handleTelegramCallback(cb) {
   const chatId = cb.message && cb.message.chat && cb.message.chat.id;
   const msgId = cb.message && cb.message.message_id;
 
+  // 📢 Announcement broadcast — conversation start
+  if (data === "act:announce") {
+    if (!isTelegramAdmin(chatId)) return;
+    await telegramApi("answerCallbackQuery", { callback_query_id: cb.id });
+    tgConversations.set(String(chatId), {
+      step: "ann_image",
+      data: {},
+      expires: Date.now() + 10 * 60 * 1000,
+    });
+    await tgReply(
+      chatId,
+      "📢 New Announcement\n\nStep 1/3 — Send the IMAGE (photo ya https URL)\n\n(or /cancel)"
+    );
+    return;
+  }
+
   // Admin config toggles (cfg:*)
   if (data.startsWith("cfg:")) {
     if (!isTelegramAdmin(chatId)) {
@@ -1736,16 +1771,49 @@ function looksLikeUrl(s) {
 async function handleTelegramMessage(msg) {
   if (!msg || !msg.chat) return;
   const chatId = msg.chat.id;
+  const convPre = tgConversations.get(String(chatId));
   const text = String(msg.text || "").trim();
-  if (!text) return;
+  if (!text && !(msg.photo && convPre && convPre.step === "ann_image")) return;
 
   if (!isTelegramAdmin(chatId)) {
     // Ignore non-admin private messages (payment buttons still work via callback)
     return;
   }
 
+  // Announcement step 1 — direct photo bhi accepted
+  if (
+    convPre &&
+    convPre.step === "ann_image" &&
+    convPre.expires > Date.now() &&
+    msg.photo &&
+    msg.photo.length
+  ) {
+    const best = msg.photo[msg.photo.length - 1];
+    try {
+      const f = await telegramApi("getFile", { file_id: best.file_id });
+      if (f && f.ok && f.result && f.result.file_path) {
+        convPre.data.image_url =
+          "https://api.telegram.org/file/bot" +
+          TELEGRAM_BOT_TOKEN +
+          "/" +
+          f.result.file_path;
+        convPre.step = "ann_title";
+        convPre.expires = Date.now() + 10 * 60 * 1000;
+        await tgReply(
+          chatId,
+          "✅ Image saved\n\nStep 2/3 — Send the TITLE (game / feature name)\n\n(or /cancel)"
+        );
+        return;
+      }
+    } catch (e) {}
+    await tgReply(chatId, "Photo load failed — send the image again (photo ya https URL):");
+    return;
+  }
+
+  if (!text) return;
+
   const lower = text.toLowerCase();
-  const conv = tgConversations.get(String(chatId));
+  const conv = convPre;
 
   // Cancel
   if (lower === "/cancel") {
@@ -1835,6 +1903,20 @@ async function handleTelegramMessage(msg) {
     return;
   }
 
+  // Start /announce — broadcast popup to all users
+  if (lower === "/announce") {
+    tgConversations.set(String(chatId), {
+      step: "ann_image",
+      data: {},
+      expires: Date.now() + 10 * 60 * 1000,
+    });
+    await tgReply(
+      chatId,
+      "📢 New Announcement\n\nStep 1/3 — Send the IMAGE (photo ya https URL)\n\n(or /cancel)"
+    );
+    return;
+  }
+
   // Continue conversation
   if (conv && conv.expires > Date.now()) {
     if (conv.step === "name") {
@@ -1885,6 +1967,89 @@ async function handleTelegramMessage(msg) {
         chatId,
         `✅ Game added!\n\n#${info.lastInsertRowid}\nName: ${conv.data.name}\nImage: ${conv.data.image_url}\nLink: ${conv.data.link_url}\n\nIt will show on the Game page.`
       );
+      return;
+    }
+    if (conv.step === "ann_image") {
+      if (!looksLikeUrl(text)) {
+        await tgReply(chatId, "Invalid URL — send the image again (photo ya full https URL):");
+        return;
+      }
+      conv.data.image_url = text.trim();
+      conv.step = "ann_title";
+      conv.expires = Date.now() + 10 * 60 * 1000;
+      await tgReply(chatId, "✅ Image saved\n\nStep 2/3 — Send the TITLE (game / feature name)");
+      return;
+    }
+    if (conv.step === "ann_title") {
+      const ttl = text.slice(0, 80).trim();
+      if (ttl.length < 2) {
+        await tgReply(chatId, "Title too short — send again:");
+        return;
+      }
+      conv.data.title = ttl;
+      conv.step = "ann_details";
+      conv.expires = Date.now() + 10 * 60 * 1000;
+      await tgReply(chatId, "✅ Title: " + ttl + "\n\nStep 3/3 — Send the DETAILS text");
+      return;
+    }
+    if (conv.step === "ann_details") {
+      conv.data.details = text.slice(0, 600).trim();
+      conv.step = "ann_confirm";
+      conv.expires = Date.now() + 10 * 60 * 1000;
+      await tgReply(
+        chatId,
+        "📢 Preview\n\n🖼 " +
+          conv.data.image_url +
+          "\n🏷 " +
+          conv.data.title +
+          "\n📝 " +
+          conv.data.details +
+          "\n\nType YES to broadcast to ALL users, NO to cancel."
+      );
+      return;
+    }
+    if (conv.step === "ann_confirm") {
+      if (lower === "yes" || lower === "y") {
+        const ann = {
+          id: Date.now(),
+          image_url: conv.data.image_url,
+          title: conv.data.title,
+          details: conv.data.details,
+          ts: Date.now(),
+        };
+        saveAnnouncement(ann);
+        tgConversations.delete(String(chatId));
+        const caption =
+          "📢 *NEW — " + ann.title + "*\n\n" + ann.details + "\n\n🐉 DRAGO Predictor";
+        const pay = {
+          chat_id: TELEGRAM_REPORT_GROUP_ID,
+          photo: ann.image_url,
+          caption,
+          parse_mode: "Markdown",
+        };
+        let r = await telegramApi("sendPhoto", pay, TELEGRAM_GROUP_BOT_TOKEN);
+        if (!r || !r.ok) r = await telegramApi("sendPhoto", pay);
+        if (!r || !r.ok) {
+          const plain = {
+            chat_id: TELEGRAM_REPORT_GROUP_ID,
+            photo: ann.image_url,
+            caption: caption.replace(/[*_`]/g, ""),
+          };
+          r = await telegramApi("sendPhoto", plain, TELEGRAM_GROUP_BOT_TOKEN);
+          if (!r || !r.ok) r = await telegramApi("sendPhoto", plain);
+        }
+        await tgReply(
+          chatId,
+          "✅ Broadcast LIVE! All users will see the popup once. Telegram group me bhi post ho gaya."
+        );
+        return;
+      }
+      if (lower === "no" || lower === "n") {
+        tgConversations.delete(String(chatId));
+        await tgReply(chatId, "Cancelled.");
+        return;
+      }
+      await tgReply(chatId, "Type YES to broadcast, NO to cancel.");
       return;
     }
   } else if (conv) {
@@ -2039,6 +2204,8 @@ async function sendAdminPanel(chatId) {
             callback_data: "cfg:winfb",
           },
         ],
+        [{ text: "📢 New Announcement", callback_data: "act:announce" }],
+        [{ text: "📢 New Announcement", callback_data: "act:announce" }],
         [{ text: "🔄 Refresh", callback_data: "cfg:refresh" }],
       ],
     },
@@ -3827,6 +3994,11 @@ app.get("/feedback-status", (req, res) => {
     rate: adminSettings.force_rate === true,
     winfb: adminSettings.force_winfb === true,
   });
+});
+
+/** Current announcement (app popup — ek baar per user) */
+app.get("/announcement", (req, res) => {
+  res.json(announcement ? { success: true, announcement } : { success: true, announcement: null });
 });
 
 /** Rating (stars) → Telegram group */
