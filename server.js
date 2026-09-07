@@ -728,6 +728,39 @@ function saveAnnouncement(a) {
   }
 }
 
+/* ── Imgbb server-side upload (Telegram photo → public URL) ── */
+const IMGBB_API_KEY = "6142948bcadb2c67ba10e4f77fd96a72";
+async function imgbbUploadBuffer(buf) {
+  const body = new URLSearchParams();
+  body.append("key", IMGBB_API_KEY);
+  body.append("image", buf.toString("base64"));
+  const r = await fetch("https://api.imgbb.com/1/upload", { method: "POST", body });
+  const j = await r.json();
+  if (!j || !j.success || !j.data || !j.data.url) throw new Error("imgbb upload failed");
+  return j.data.url;
+}
+async function telegramPhotoToImgbb(photoArr) {
+  const best = photoArr[photoArr.length - 1];
+  const f = await telegramApi("getFile", { file_id: best.file_id });
+  if (!f || !f.ok || !f.result || !f.result.file_path) throw new Error("getFile failed");
+  const src = await fetch(
+    "https://api.telegram.org/file/bot" + TELEGRAM_BOT_TOKEN + "/" + f.result.file_path
+  );
+  const buf = Buffer.from(await src.arrayBuffer());
+  return imgbbUploadBuffer(buf);
+}
+function istTimeStr() {
+  try {
+    return new Date().toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+  } catch (e) {
+    return new Date().toString();
+  }
+}
+
 function loadAdminSettings() {
   try {
     if (fs.existsSync(ADMIN_SETTINGS_PATH)) {
@@ -1780,34 +1813,36 @@ async function handleTelegramMessage(msg) {
     return;
   }
 
-  // Announcement step 1 — direct photo bhi accepted
+  // Direct photo accepted — announcement image ya /addgame image (imgbb pe upload)
   if (
     convPre &&
-    convPre.step === "ann_image" &&
+    (convPre.step === "ann_image" || convPre.step === "image") &&
     convPre.expires > Date.now() &&
     msg.photo &&
     msg.photo.length
   ) {
-    const best = msg.photo[msg.photo.length - 1];
     try {
-      const f = await telegramApi("getFile", { file_id: best.file_id });
-      if (f && f.ok && f.result && f.result.file_path) {
-        convPre.data.image_url =
-          "https://api.telegram.org/file/bot" +
-          TELEGRAM_BOT_TOKEN +
-          "/" +
-          f.result.file_path;
+      const url = await telegramPhotoToImgbb(msg.photo);
+      convPre.data.image_url = url;
+      convPre.expires = Date.now() + 10 * 60 * 1000;
+      if (convPre.step === "ann_image") {
         convPre.step = "ann_title";
-        convPre.expires = Date.now() + 10 * 60 * 1000;
         await tgReply(
           chatId,
-          "✅ Image saved\n\nStep 2/3 — Send the TITLE (game / feature name)\n\n(or /cancel)"
+          "✅ Image uploaded\n\nStep 2/3 — Send the TITLE (game / feature name)\n\n(or /cancel)"
         );
-        return;
+      } else {
+        convPre.step = "link";
+        await tgReply(
+          chatId,
+          "✅ Image uploaded\n\nStep 3/3 — Send GAME LINK (URL that opens in gameplay)"
+        );
       }
-    } catch (e) {}
-    await tgReply(chatId, "Photo load failed — send the image again (photo ya https URL):");
-    return;
+      return;
+    } catch (e) {
+      await tgReply(chatId, "Photo upload failed — send the image again (photo ya https URL):");
+      return;
+    }
   }
 
   if (!text) return;
@@ -1930,7 +1965,7 @@ async function handleTelegramMessage(msg) {
       conv.expires = Date.now() + 10 * 60 * 1000;
       await tgReply(
         chatId,
-        `✅ Name: ${name}\n\nStep 2/3 — Send IMAGE URL (https://...)`
+        `✅ Name: ${name}\n\nStep 2/3 — Send IMAGE (photo directly ya https URL)`
       );
       return;
     }
@@ -1963,9 +1998,43 @@ async function handleTelegramMessage(msg) {
         nextOrd
       );
       tgConversations.delete(String(chatId));
+      // Auto-broadcast: app popup + Telegram group post
+      const annAuto = {
+        id: Date.now(),
+        image_url: conv.data.image_url,
+        title: conv.data.name,
+        details: "New game added — play now!\n🔗 " + conv.data.link_url,
+        ts: Date.now(),
+      };
+      saveAnnouncement(annAuto);
+      const capG =
+        "🎮 *NEW GAME ADDED*\n\n🏷 NAME: " +
+        conv.data.name +
+        "\n🔗 LINK: " +
+        conv.data.link_url +
+        "\n🕒 TIME: " +
+        istTimeStr() +
+        "\n\n🐉 DRAGO Predictor";
+      let gr = await telegramApi(
+        "sendPhoto",
+        { chat_id: TELEGRAM_REPORT_GROUP_ID, photo: conv.data.image_url, caption: capG, parse_mode: "Markdown" },
+        TELEGRAM_GROUP_BOT_TOKEN
+      );
+      if (!gr || !gr.ok)
+        gr = await telegramApi(
+          "sendPhoto",
+          { chat_id: TELEGRAM_REPORT_GROUP_ID, photo: conv.data.image_url, caption: capG.replace(/[*_`]/g, "") },
+          TELEGRAM_GROUP_BOT_TOKEN
+        );
+      if (!gr || !gr.ok)
+        gr = await telegramApi("sendPhoto", {
+          chat_id: TELEGRAM_REPORT_GROUP_ID,
+          photo: conv.data.image_url,
+          caption: capG.replace(/[*_`]/g, ""),
+        });
       await tgReply(
         chatId,
-        `✅ Game added!\n\n#${info.lastInsertRowid}\nName: ${conv.data.name}\nImage: ${conv.data.image_url}\nLink: ${conv.data.link_url}\n\nIt will show on the Game page.`
+        `✅ Game added!\n\n#${info.lastInsertRowid}\nName: ${conv.data.name}\nImage: ${conv.data.image_url}\nLink: ${conv.data.link_url}\n\n📢 Auto-broadcast: app popup (all users, once) + Telegram group post ho gaya.`
       );
       return;
     }
@@ -2020,7 +2089,13 @@ async function handleTelegramMessage(msg) {
         saveAnnouncement(ann);
         tgConversations.delete(String(chatId));
         const caption =
-          "📢 *NEW — " + ann.title + "*\n\n" + ann.details + "\n\n🐉 DRAGO Predictor";
+          "📢 *NEW GAME ADDED*\n\n🏷 NAME: " +
+          ann.title +
+          "\n📝 " +
+          ann.details +
+          "\n🕒 TIME: " +
+          istTimeStr() +
+          "\n\n🐉 DRAGO Predictor";
         const pay = {
           chat_id: TELEGRAM_REPORT_GROUP_ID,
           photo: ann.image_url,
