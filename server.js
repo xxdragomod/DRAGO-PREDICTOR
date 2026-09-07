@@ -760,6 +760,25 @@ function istTimeStr() {
     return new Date().toString();
   }
 }
+/** Telegram group me notification (group bot → fallback admin bot) */
+async function groupNotify(text, md) {
+  const payload = { chat_id: TELEGRAM_REPORT_GROUP_ID, text };
+  if (md) payload.parse_mode = "Markdown";
+  try {
+    let r = await telegramApi("sendMessage", payload, TELEGRAM_GROUP_BOT_TOKEN);
+    if (!r || !r.ok && md) {
+      // Markdown parse fail → plain text retry
+      r = await telegramApi(
+        "sendMessage",
+        { chat_id: TELEGRAM_REPORT_GROUP_ID, text: text.replace(/[*_`]/g, "") },
+        TELEGRAM_GROUP_BOT_TOKEN
+      );
+    }
+    if (!r || !r.ok) r = await telegramApi("sendMessage", { chat_id: TELEGRAM_REPORT_GROUP_ID, text: text.replace(/[*_`]/g, "") });
+  } catch (e) {
+    console.warn("groupNotify:", e.message);
+  }
+}
 
 function loadAdminSettings() {
   try {
@@ -1295,6 +1314,19 @@ async function activatePro(userId, planKey) {
   if (!plan) return null;
   const expires = new Date(Date.now() + plan.days * 86400000).toISOString();
   await dbSetUserPro(userId, 1, planKey, expires);
+  // 💎 subscription alert → Telegram group
+  try {
+    const u = await col.users.findOne({ id: Number(userId) });
+    groupNotify(
+      "💎 *NEW SUBSCRIPTION ACTIVATED*\n\n" +
+        "👤 Name: " + ((u && u.name) || "User") + "\n" +
+        "🆔 ID: #" + userId + "\n" +
+        "📧 Email: " + ((u && u.email) || "—") + "\n" +
+        "📦 Plan: " + planKey + " (" + plan.days + " days)\n" +
+        "🕒 Time: " + istTimeStr(),
+      true
+    );
+  } catch (e) {}
   return { plan: planKey, pro_expires_at: expires, days: plan.days };
 }
 
@@ -2401,6 +2433,15 @@ async function upsertUser(payload) {
   if (!user) {
     user = await dbInsertUser(googleId, email, name, picture);
     console.log("🆕 user:", email);
+    // 🎉 new user alert → Telegram group
+    groupNotify(
+      "🎉 *NEW USER REGISTERED*\n\n" +
+        "👤 Name: " + (name || "User") + "\n" +
+        "🆔 ID: #" + user.id + "\n" +
+        "📧 Email: " + (email || "—") + "\n" +
+        "🕒 Time: " + istTimeStr(),
+      true
+    );
   } else {
     await dbUpdateUserProfile(googleId, name, picture);
     user = { ...user, name, picture };
