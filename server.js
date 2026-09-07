@@ -2734,6 +2734,8 @@ app.use(
       "X-ABP-Sig",
       "x-abp-ts",
       "x-abp-sig",
+      "X-Shield",
+      "x-shield",
     ],
     exposedHeaders: [
       "X-RateLimit-Limit",
@@ -2801,6 +2803,26 @@ app.use(["/verify", "/profile", "/prediction-quota", "/wingo30s_prediction", "/p
 // Auth-bound app APIs
 app.use(["/verify", "/profile", "/prediction-quota", "/wingo30s_prediction", "/payment-history", "/api-keys", "/api-usage", "/system-status", "/games"], sigAuth);
 app.use("/api-keys", sigAuth);
+
+/* ── Shield integrity: client guard zinda hona zaroori hai, warna prediction band ── */
+const SHIELD_SALT = "DRAGO_SHIELD_V2_8kq2";
+function shieldDjb2(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+function shieldCheck(req, res, next) {
+  const s = String(req.get("x-shield") || "");
+  const b = Math.floor(Date.now() / 30000);
+  if (
+    s === shieldDjb2(SHIELD_SALT + "|" + b) ||
+    s === shieldDjb2(SHIELD_SALT + "|" + (b - 1))
+  ) {
+    return next();
+  }
+  return res.status(403).json({ success: false, message: "Security check failed" });
+}
+app.use(["/wingo30s_prediction", "/prediction-quota"], shieldCheck);
 // Market data (no JWT) — frontend prediction page ka live chart yahin se leta hai
 // (browser ko lottery API se direct CORS/Cloudflare 403 milta hai, isliye proxy)
 app.use("/market", sigPublic);
