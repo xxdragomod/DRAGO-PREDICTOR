@@ -308,7 +308,15 @@ async function dbFindUserByIdLite(id) {
     pro_expires_at: u.pro_expires_at,
   };
 }
-async function dbInsertUser(googleId, email, name, picture) {
+async function genRefCode() {
+  for (let i = 0; i < 5; i++) {
+    const c = crypto.randomBytes(4).toString("hex");
+    const ex = await col.users.findOne({ ref_code: c });
+    if (!ex) return c;
+  }
+  return crypto.randomBytes(6).toString("hex");
+}
+async function dbInsertUser(googleId, email, name, picture, referredBy) {
   const id = await nextSeq("users");
   const doc = {
     id,
@@ -320,10 +328,42 @@ async function dbInsertUser(googleId, email, name, picture) {
     pro_plan: null,
     pro_expires_at: null,
     free_pred_used: 0,
+    ref_code: await genRefCode(),
+    referred_by: referredBy || null,
+    ref_count: 0,
+    ref_rewarded: false,
     created_at: new Date().toISOString(),
   };
   await col.users.insertOne(doc);
   return mapUser(doc);
+}
+/** Referrer count badhao; 10 complete → ₹300 plan free (ek baar) */
+async function bumpReferrer(code) {
+  try {
+    const referrer = await col.users.findOne({ ref_code: code });
+    if (!referrer) return;
+    await col.users.updateOne({ ref_code: code }, { $inc: { ref_count: 1 } });
+    const newCount = (referrer.ref_count || 0) + 1;
+    if (newCount >= 10 && !referrer.ref_rewarded) {
+      const upd = await col.users.updateOne(
+        { ref_code: code, ref_rewarded: { $ne: true } },
+        { $set: { ref_rewarded: true } }
+      );
+      if (upd && upd.modifiedCount) {
+        await activatePro(referrer.id, "test");
+        groupNotify(
+          "🎁 *REFERRAL REWARD UNLOCKED*\n\n" +
+            "👤 Name: " + (referrer.name || "User") + "\n" +
+            "🆔 ID: #" + referrer.id + "\n" +
+            "🏆 10 referrals complete — ₹300 plan FREE activate ho gaya\n" +
+            "🕒 Time: " + istTimeStr(),
+          true
+        );
+      }
+    }
+  } catch (e) {
+    console.warn("bumpReferrer:", e.message);
+  }
 }
 async function dbUpdateUserProfile(googleId, name, picture) {
   await col.users.updateOne(
@@ -1474,13 +1514,13 @@ async function handleTelegramCallback(cb) {
     if (!isTelegramAdmin(chatId)) return;
     await telegramApi("answerCallbackQuery", { callback_query_id: cb.id });
     tgConversations.set(String(chatId), {
-      step: "ann_image",
+      step: "ann_type",
       data: {},
       expires: Date.now() + 10 * 60 * 1000,
     });
     await tgReply(
       chatId,
-      "📢 New Announcement\n\nStep 1/3 — Send the IMAGE (photo ya https URL)\n\n(or /cancel)"
+      "📢 New Announcement\n\nType bhejo:\n1 = 🎮 New Game\n2 = ⚡ Server Update\n3 = 📢 Other\n\n(or /cancel)"
     );
     return;
   }
@@ -1972,13 +2012,13 @@ async function handleTelegramMessage(msg) {
   // Start /announce — broadcast popup to all users
   if (lower === "/announce") {
     tgConversations.set(String(chatId), {
-      step: "ann_image",
+      step: "ann_type",
       data: {},
       expires: Date.now() + 10 * 60 * 1000,
     });
     await tgReply(
       chatId,
-      "📢 New Announcement\n\nStep 1/3 — Send the IMAGE (photo ya https URL)\n\n(or /cancel)"
+      "📢 New Announcement\n\nType bhejo:\n1 = 🎮 New Game\n2 = ⚡ Server Update\n3 = 📢 Other\n\n(or /cancel)"
     );
     return;
   }
@@ -2069,6 +2109,22 @@ async function handleTelegramMessage(msg) {
       );
       return;
     }
+    if (conv.step === "ann_type") {
+      const t = lower.trim();
+      let type = "other";
+      if (t === "1" || t.indexOf("game") !== -1) type = "game";
+      else if (t === "2" || t.indexOf("update") !== -1 || t.indexOf("server") !== -1) type = "update";
+      conv.data.type = type;
+      conv.step = "ann_image";
+      conv.expires = Date.now() + 10 * 60 * 1000;
+      await tgReply(
+        chatId,
+        "✅ Type: " +
+          (type === "game" ? "🎮 New Game" : type === "update" ? "⚡ Server Update" : "📢 Other") +
+          "\n\nStep 1/3 — Send the IMAGE (photo ya https URL)"
+      );
+      return;
+    }
     if (conv.step === "ann_image") {
       if (!looksLikeUrl(text)) {
         await tgReply(chatId, "Invalid URL — send the image again (photo ya full https URL):");
@@ -2119,8 +2175,14 @@ async function handleTelegramMessage(msg) {
         };
         saveAnnouncement(ann);
         tgConversations.delete(String(chatId));
+        const hdr =
+          conv.data.type === "game"
+            ? "🎮 *NEW GAME ADDED*"
+            : conv.data.type === "update"
+              ? "⚡ *SERVER UPDATE*"
+              : "📢 *NEW UPDATE*";
         const caption =
-          "📢 *NEW GAME ADDED*\n\n🏷 NAME: " +
+          hdr + "\n\n🏷 NAME: " +
           ann.title +
           "\n📝 " +
           ann.details +
@@ -2364,25 +2426,29 @@ console.log("✅ MongoDB driver loaded (connect on listen)");
 
 // ─── OAuth state store (memory) — cookie ke saath double protection ─────────
 // Cookie free hosts / cross-proxy pe kabhi fail hoti hai; memory reliable hai.
-const oauthStates = new Map(); // state → expiresAt
+const oauthStates = new Map(); // state → { exp, ref }
 const STATE_TTL_MS = 10 * 60 * 1000;
 
-function saveState(state) {
-  oauthStates.set(state, Date.now() + STATE_TTL_MS);
+function saveState(state, ref) {
+  oauthStates.set(state, { exp: Date.now() + STATE_TTL_MS, ref: ref || null });
   // Cleanup stale
   if (oauthStates.size > 500) {
     const now = Date.now();
-    for (const [k, exp] of oauthStates) {
-      if (exp < now) oauthStates.delete(k);
+    for (const [k, v] of oauthStates) {
+      if (v.exp < now) oauthStates.delete(k);
     }
   }
 }
 
 function consumeState(state) {
-  if (!state) return false;
-  const exp = oauthStates.get(state);
+  if (!state) return { ok: false, ref: null };
+  const v = oauthStates.get(state);
   oauthStates.delete(state);
-  return Boolean(exp && exp >= Date.now());
+  if (!v || v.exp < Date.now()) return { ok: false, ref: null };
+  return { ok: true, ref: v.ref || null };
+}
+function sanitizeRef(r) {
+  return String(r || "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 12) || null;
 }
 
 // ─── Google client ──────────────────────────────────────────────────────────
@@ -2422,7 +2488,7 @@ function bearerToken(req) {
   return h.slice(7).trim() || null;
 }
 
-async function upsertUser(payload) {
+async function upsertUser(payload, refCode) {
   const googleId = payload.sub;
   const email = payload.email || "";
   const name = payload.name || "";
@@ -2430,13 +2496,21 @@ async function upsertUser(payload) {
 
   let user = await dbFindUserByGoogle(googleId);
   if (!user) {
-    user = await dbInsertUser(googleId, email, name, picture);
+    // Referral: valid code ho to referrer ko credit (server-side, self-referral impossible)
+    let referredBy = null;
+    if (refCode) {
+      const referrer = await col.users.findOne({ ref_code: refCode });
+      if (referrer) referredBy = refCode;
+    }
+    user = await dbInsertUser(googleId, email, name, picture, referredBy);
     console.log("🆕 user:", email);
+    if (referredBy) bumpReferrer(referredBy);
     // 🎉 new user alert → Telegram group
     groupNotify(
       "🎉 *NEW USER REGISTERED*\n\n" +
         "👤 Name: " + (name || "User") + "\n" +
         "🆔 ID: #" + user.id + "\n" +
+        (referredBy ? "🔗 Referred by: " + referredBy + "\n" : "") +
         "🕒 Time: " + istTimeStr(),
       true
     );
@@ -2760,7 +2834,7 @@ app.get("/auth/google", (req, res) => {
   }
   const redirectUri = `${publicBase(req)}/auth/google/callback`;
   const state = crypto.randomBytes(24).toString("hex");
-  saveState(state);
+  saveState(state, sanitizeRef(req.query.ref));
 
   // Cookie backup (same-site backend callback)
   res.cookie("drago_oauth_state", state, {
@@ -2817,8 +2891,8 @@ app.get("/auth/google/callback", async (req, res) => {
       return null;
     })();
 
-    const stateOk =
-      consumeState(state) || (state && cookieState && state === cookieState);
+    const st = consumeState(state);
+    const stateOk = st.ok || (state && cookieState && state === cookieState);
 
     res.clearCookie("drago_oauth_state", { path: "/" });
 
@@ -2845,7 +2919,7 @@ app.get("/auth/google/callback", async (req, res) => {
       return fail("invalid payload");
     }
 
-    const user = await upsertUser(payload);
+    const user = await upsertUser(payload, st.ref);
     const token = signToken(user);
 
     // Hash fragment — server logs / referrer mein nahi jata
@@ -4113,6 +4187,30 @@ app.get("/feedback-status", (req, res) => {
 /** Current announcement (app popup — ek baar per user) */
 app.get("/announcement", (req, res) => {
   res.json(announcement ? { success: true, announcement } : { success: true, announcement: null });
+});
+
+/** Referral status — code, count, link (JWT required) */
+app.get("/ref-status", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  try {
+    const u = await col.users.findOne({ id: Number(decoded.id) });
+    if (!u) return res.status(404).json({ success: false, message: "user not found" });
+    if (!u.ref_code) {
+      const c = await genRefCode();
+      await col.users.updateOne({ id: u.id }, { $set: { ref_code: c } });
+      u.ref_code = c;
+    }
+    res.json({
+      success: true,
+      code: u.ref_code,
+      count: u.ref_count || 0,
+      rewarded: !!u.ref_rewarded,
+      link: FRONTEND_URL + "/?ref=" + u.ref_code,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: "server error" });
+  }
 });
 
 /** Rating (stars) → Telegram group */
