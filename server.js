@@ -1321,7 +1321,6 @@ async function activatePro(userId, planKey) {
       "💎 *NEW SUBSCRIPTION ACTIVATED*\n\n" +
         "👤 Name: " + ((u && u.name) || "User") + "\n" +
         "🆔 ID: #" + userId + "\n" +
-        "📧 Email: " + ((u && u.email) || "—") + "\n" +
         "📦 Plan: " + planKey + " (" + plan.days + " days)\n" +
         "🕒 Time: " + istTimeStr(),
       true
