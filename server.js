@@ -2437,7 +2437,6 @@ async function upsertUser(payload) {
       "🎉 *NEW USER REGISTERED*\n\n" +
         "👤 Name: " + (name || "User") + "\n" +
         "🆔 ID: #" + user.id + "\n" +
-        "📧 Email: " + (email || "—") + "\n" +
         "🕒 Time: " + istTimeStr(),
       true
     );
