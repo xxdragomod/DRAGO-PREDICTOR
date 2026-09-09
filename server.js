@@ -979,8 +979,9 @@ async function requireApiKey(req, res, endpointName) {
     }
   }
 
-  // prediction/history: 2 req/min (free + pro dono) — autobet: 6 req/min
-  const cap = endpointName === "autobet" ? 6 : 2;
+  // prediction/history: 2 req/min (free + pro dono) — autobet: 30 req/min
+  // (auto-bet ke retry bursts ke liye zaroori; scraper ke liye key-BAN + logs hain)
+  const cap = endpointName === "autobet" ? 30 : 2;
   const rate = checkApiRateLimit(row.user_id, endpointName, cap);
 
   res.setHeader("X-RateLimit-Limit", String(rate.limit));
