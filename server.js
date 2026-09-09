@@ -2681,25 +2681,63 @@ const allowedOrigins = [
   "http://127.0.0.1:3000",
 ].filter(Boolean);
 
-// Block unknown browser origins on app routes (not /v1)
+// ─── HARD GATE: sirf apni app respond ho, baaki sab ko silent 404 ───────────
+const TRUSTED_ORIGINS = [
+  FRONTEND_URL,
+  "https://dragopredictor.vercel.app",
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "http://127.0.0.1:3000",
+].filter(Boolean);
+const OPEN_PATHS = /^\/(auth\/google|v1(\/|$)|favicon)/;
+function trustedOrigin(req) {
+  const o = req.get("origin") || "";
+  if (
+    o &&
+    (TRUSTED_ORIGINS.includes(o) ||
+      o.startsWith("http://localhost") ||
+      o.startsWith("http://127.0.0.1"))
+  )
+    return true;
+  const ref = req.get("referer") || "";
+  if (ref) {
+    try {
+      const r = new URL(ref).origin;
+      if (
+        TRUSTED_ORIGINS.includes(r) ||
+        r.startsWith("http://localhost") ||
+        r.startsWith("http://127.0.0.1")
+      )
+        return true;
+    } catch (_) {}
+  }
+  return false;
+}
+// Silent per-IP rate limit (300 req/min) — cross hone par bhi silent 404
+const rlMap = new Map();
+setInterval(() => rlMap.clear(), 60 * 1000);
 app.use((req, res, next) => {
-  const isV1 = req.path.startsWith("/v1") || String(req.originalUrl || "").startsWith("/v1");
-  if (isV1) return next();
-  const origin = req.get("origin");
-  if (!origin) return next();
-  try {
-    const host = new URL(origin).hostname;
-    if (
-      allowedOrigins.includes(origin) ||
-      host === ALLOWED_WEB_DOMAIN ||
-      host.endsWith(".vercel.app") ||
-      host === "localhost" ||
-      host === "127.0.0.1"
-    ) {
-      return next();
-    }
-  } catch (_) {}
-  return res.status(404).json({ success: false, message: "Not found" });
+  const ip = req.ip || "x";
+  const n = (rlMap.get(ip) || 0) + 1;
+  rlMap.set(ip, n);
+  if (n > 300) return res.status(404).end();
+  next();
+});
+// Origin gate: /v1 (public dev API) + Google OAuth khule hain; baaki routes pe
+// trusted origin YA app-auth headers zaroori. Anonymous scan → kuch nahi dikhta.
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") return next();
+  if (OPEN_PATHS.test(req.path)) return next();
+  if (trustedOrigin(req)) return next();
+  if (
+    req.get("x-signature") ||
+    req.get("x-shield") ||
+    req.get("x-abp-sig") ||
+    req.get("x-api-key") ||
+    (req.get("authorization") || "").startsWith("Bearer ")
+  )
+    return next();
+  return res.status(404).end();
 });
 
 app.use(
@@ -2713,7 +2751,7 @@ app.use(
           return cb(null, true);
         }
       } catch (_) {}
-      return cb(null, true);
+      return cb(null, false); // unknown origin → CORS deny
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: [
@@ -2835,12 +2873,37 @@ app.use("/order-status", sigPay);
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
+/**
+ * ImgBB upload proxy — key sirf server env (IMGBB_KEY) me, client ko kabhi nahi milti.
+ * Auth: Bearer JWT (logged-in user only).
+ */
+app.post("/imgbb-upload", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  const KEY = process.env.IMGBB_KEY;
+  const img = String((req.body && req.body.image) || "");
+  if (!KEY) return res.status(500).json({ success: false, message: "upload not configured" });
+  if (!img || img.length > 2500000)
+    return res.status(400).json({ success: false, message: "invalid image" });
+  try {
+    const r = await fetch("https://api.imgbb.com/1/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "key=" + encodeURIComponent(KEY) + "&image=" + encodeURIComponent(img),
+    });
+    const j = await r.json();
+    if (!j || !j.success || !j.data || !j.data.url) {
+      return res.status(502).json({ success: false, message: "upstream failed" });
+    }
+    return res.json({ success: true, url: j.data.url });
+  } catch (e) {
+    return res.status(502).json({ success: false, message: "upstream failed" });
+  }
+});
+
+// Root: outsiders ko kuch nahi dikhta (silent 404)
 app.get("/", (_req, res) => {
-  res.json({
-    success: true,
-    message: "🐉 DRAGO API is running!",
-    timestamp: new Date().toISOString(),
-  });
+  res.status(404).end();
 });
 
 /**
@@ -4653,15 +4716,15 @@ app.post("/payment-appeal", async (req, res) => {
   res.json({ success: true, message: "Appeal sent to admin." });
 });
 
-// 404
+// 404 — silent, koi body nahi (existence reveal nahi)
 app.use((_req, res) => {
-  res.status(404).json({ success: false, message: "Not found" });
+  res.status(404).end();
 });
 
-// Error handler
+// Error handler — silent
 app.use((err, _req, res, _next) => {
   console.error("unhandled:", err.message);
-  res.status(500).json({ success: false, message: "Internal server error" });
+  res.status(500).end();
 });
 
 // ─── Start ──────────────────────────────────────────────────────────────────
