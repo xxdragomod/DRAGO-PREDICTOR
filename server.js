@@ -857,8 +857,8 @@ const FREE_PRED_LIMIT = 3;
 const FREE_API_HISTORY_LIMIT = 10;
 const SERVER_BRAND = "🐉 DRAGO PREDICTOR";
 
-/** Developer API rate limit: 20 requests / minute / user / endpoint */
-const API_RATE_LIMIT = 20;
+/** Developer API rate limit: 2 requests / minute / user / endpoint (free + pro dono) */
+const API_RATE_LIMIT = 2;
 const API_RATE_WINDOW_MS = 60 * 1000;
 const apiRateBuckets = new Map(); // `${userId}:${endpoint}` → number[] timestamps
 
@@ -979,41 +979,21 @@ async function requireApiKey(req, res, endpointName) {
     }
   }
 
-  const rate = isPro
-    ? checkApiRateLimit(row.user_id, endpointName)
-    : {
-        ok: true,
-        limit: freeApiHistoryLimit(),
-        remaining: Math.max(
-          0,
-          freeApiHistoryLimit() -
-            (Number(
-              usageMap(await dbUsageByUserTotal(row.user_id)).history
-            ) || 0)
-        ),
-        reset_sec: 0,
-      };
+  // HAR tier (free + pro) pe 2 req/min/endpoint — pro bhi prediction 2, history 2
+  const rate = checkApiRateLimit(row.user_id, endpointName);
 
-  if (isPro) {
-    res.setHeader("X-RateLimit-Limit", String(rate.limit));
-    res.setHeader("X-RateLimit-Remaining", String(rate.remaining));
-    res.setHeader("X-RateLimit-Reset", String(rate.reset_sec));
-    if (!rate.ok) {
-      res.status(429).json({
-        success: false,
-        message: `Rate limit: max ${rate.limit} requests per minute for ${endpointName}`,
-        limit: rate.limit,
-        remaining: 0,
-        reset_sec: rate.reset_sec,
-      });
-      return null;
-    }
-  } else {
-    res.setHeader("X-RateLimit-Limit", String(freeApiHistoryLimit()));
-    res.setHeader(
-      "X-RateLimit-Remaining",
-      String(Math.max(0, rate.remaining - 1))
-    );
+  res.setHeader("X-RateLimit-Limit", String(rate.limit));
+  res.setHeader("X-RateLimit-Remaining", String(rate.remaining));
+  res.setHeader("X-RateLimit-Reset", String(rate.reset_sec));
+  if (!rate.ok) {
+    res.status(429).json({
+      success: false,
+      message: `Rate limit: max ${rate.limit} requests per minute for ${endpointName}`,
+      limit: rate.limit,
+      remaining: 0,
+      reset_sec: rate.reset_sec,
+    });
+    return null;
   }
 
   try {
@@ -2645,6 +2625,7 @@ function requireAppSignature(mode) {
     const userIdHdr = String(req.get("x-user-id") || "").trim();
     const userNameHdr = String(req.get("x-user-name") || "").trim();
 
+    // App-requests pehle jaisi chalti hain — signature aaye to verify + log karo
     if (sig && APP_SECRET && ts) {
       const pathOnly = String(req.originalUrl || req.url || "").split("?")[0];
       const payload = buildSignPayload({
@@ -2732,9 +2713,7 @@ app.use((req, res, next) => {
   if (
     req.get("x-signature") ||
     req.get("x-shield") ||
-    req.get("x-abp-sig") ||
-    req.get("x-api-key") ||
-    (req.get("authorization") || "").startsWith("Bearer ")
+    req.get("x-abp-sig")
   )
     return next();
   return res.status(404).end();
@@ -2911,6 +2890,18 @@ app.get("/", (_req, res) => {
  * Client ID/Secret kabhi frontend pe nahi jaate.
  */
 app.get("/auth/google", (req, res) => {
+  // Sirf apni site se login start ho sakta hai — bahar ki site/bot ko silent 404
+  const ref = req.get("referer") || req.get("origin") || "";
+  let okRef = false;
+  try {
+    const o = new URL(ref).origin;
+    okRef =
+      TRUSTED_ORIGINS.includes(o) ||
+      o.startsWith("http://localhost") ||
+      o.startsWith("http://127.0.0.1");
+  } catch (_) {}
+  if (!okRef) return res.status(404).end();
+
   if (!adminSettings.google_auth_enabled) {
     return res.status(403).json({
       success: false,
