@@ -2626,9 +2626,13 @@ function requireAppSignature(mode) {
     const userIdHdr = String(req.get("x-user-id") || "").trim();
     const userNameHdr = String(req.get("x-user-name") || "").trim();
 
-    // HARD ENFORCE: valid HMAC + fresh ts (±5 min) zaroori — warna silent 404.
-    // APP_SECRET env me set hone ke baad hi ye layer active hoti hai.
-    if (!sig || !ts || !APP_SECRET) {
+    // HARD ENFORCE (sirf jab server pe APP_SECRET set ho) — warna legacy warn-only,
+    // taaki env miss/mismatch se app kabhi na toote.
+    if (!APP_SECRET) {
+      req.dragoMeta = { domain, appId, ts, nonce, userIdHdr, userNameHdr };
+      return next();
+    }
+    if (!sig || !ts) {
       return res.status(404).end();
     }
     const tsNum = Number(ts);
@@ -4825,6 +4829,10 @@ async function boot() {
   }
 
   app.listen(PORT, () => {
+    console.log(
+      "🔐 SIG layer:",
+      APP_SECRET && APP_ID ? "ACTIVE (HMAC enforce)" : "DISABLED (APP_ID/APP_SECRET env missing)"
+    );
     console.log(`🚀 DRAGO on :${PORT}`);
     console.log(`   Frontend: ${FRONTEND_URL}`);
     console.log(`   Allowed domain: ${ALLOWED_WEB_DOMAIN}`);
