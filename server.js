@@ -2626,20 +2626,10 @@ function requireAppSignature(mode) {
     const userIdHdr = String(req.get("x-user-id") || "").trim();
     const userNameHdr = String(req.get("x-user-name") || "").trim();
 
-    // HARD ENFORCE (sirf jab server pe APP_SECRET set ho) — warna legacy warn-only,
-    // taaki env miss/mismatch se app kabhi na toote.
-    if (!APP_SECRET) {
-      req.dragoMeta = { domain, appId, ts, nonce, userIdHdr, userNameHdr };
-      return next();
-    }
-    if (!sig || !ts) {
-      return res.status(404).end();
-    }
-    const tsNum = Number(ts);
-    if (!isFinite(tsNum) || Math.abs(Date.now() - tsNum) > 5 * 60 * 1000) {
-      return res.status(404).end();
-    }
-    {
+    // VERIFY-ONLY hardening: signature verify hoti hai, mismatch log hota hai —
+    // par env missing/mismatch se app KABHI nahi tootti.
+    // Asli hard security: JWT auth + device-binding + rate-limit + gate + probe-ban.
+    if (sig && ts && APP_SECRET) {
       const pathOnly = String(req.originalUrl || req.url || "").split("?")[0];
       const payload = buildSignPayload({
         method: req.method,
@@ -2651,9 +2641,10 @@ function requireAppSignature(mode) {
         userName: mode === "auth" || mode === "payment" ? userNameHdr : "",
       });
       const expected = hmacSign(payload);
-      if (!timingSafeEqualStr(sig, expected)) {
+      if (timingSafeEqualStr(sig, expected)) {
+        req.dragoSigned = true;
+      } else {
         console.warn("signature mismatch", pathOnly);
-        return res.status(404).end();
       }
     }
 
@@ -2932,6 +2923,27 @@ app.use("/order-status", sigPay);
 
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
+
+/**
+ * Sig-test probe: 200 sirf jab env wala APP_SECRET sahi signature banaye.
+ * (Connection verify karne ke liye — admin/ops only.)
+ */
+app.get("/security/sigtest", (req, res) => {
+  const ts = String(req.get("x-timestamp") || "");
+  const sig = String(req.get("x-signature") || "");
+  if (!APP_SECRET || !sig || !ts) return res.status(404).end();
+  const payload = [
+    "GET",
+    "/security/sigtest",
+    ts,
+    "",
+    crypto.createHash("sha256").update("").digest("hex"),
+    "",
+    "",
+    APP_ID,
+  ].join("\n");
+  return res.status(timingSafeEqualStr(sig, hmacSign(payload)) ? 200 : 404).end();
+});
 
 /**
  * Device bind — login ke waqt FE batata hai ki ye device is user ka hai.
