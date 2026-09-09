@@ -857,21 +857,21 @@ const FREE_PRED_LIMIT = 3;
 const FREE_API_HISTORY_LIMIT = 10;
 const SERVER_BRAND = "🐉 DRAGO PREDICTOR";
 
-/** Developer API rate limit: 2 requests / minute / user / endpoint (free + pro dono) */
-const API_RATE_LIMIT = 2;
+/** Developer API rate limit: prediction/history 2 req/min (free + pro), autobet 20 req/min */
 const API_RATE_WINDOW_MS = 60 * 1000;
 const apiRateBuckets = new Map(); // `${userId}:${endpoint}` → number[] timestamps
 
-function checkApiRateLimit(userId, endpoint) {
+function checkApiRateLimit(userId, endpoint, limit) {
+  const cap = Number(limit) > 0 ? Number(limit) : 2;
   const k = String(userId) + ":" + endpoint;
   const now = Date.now();
   let arr = apiRateBuckets.get(k) || [];
   arr = arr.filter((t) => now - t < API_RATE_WINDOW_MS);
-  if (arr.length >= API_RATE_LIMIT) {
+  if (arr.length >= cap) {
     const resetMs = Math.max(0, API_RATE_WINDOW_MS - (now - arr[0]));
     return {
       ok: false,
-      limit: API_RATE_LIMIT,
+      limit: cap,
       remaining: 0,
       reset_sec: Math.ceil(resetMs / 1000),
     };
@@ -888,8 +888,8 @@ function checkApiRateLimit(userId, endpoint) {
   }
   return {
     ok: true,
-    limit: API_RATE_LIMIT,
-    remaining: API_RATE_LIMIT - arr.length,
+    limit: cap,
+    remaining: cap - arr.length,
     reset_sec: 60,
   };
 }
@@ -979,8 +979,9 @@ async function requireApiKey(req, res, endpointName) {
     }
   }
 
-  // HAR tier (free + pro) pe 2 req/min/endpoint — pro bhi prediction 2, history 2
-  const rate = checkApiRateLimit(row.user_id, endpointName);
+  // prediction/history: 2 req/min (free + pro dono) — autobet: 20 req/min
+  const cap = endpointName === "autobet" ? 20 : 2;
+  const rate = checkApiRateLimit(row.user_id, endpointName, cap);
 
   res.setHeader("X-RateLimit-Limit", String(rate.limit));
   res.setHeader("X-RateLimit-Remaining", String(rate.remaining));
