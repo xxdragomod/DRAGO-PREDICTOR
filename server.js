@@ -2719,6 +2719,38 @@ app.use((req, res, next) => {
   return res.status(404).end();
 });
 
+// ─── Extra layer: hacker-probe detection → 24h silent IP ban ────────────────
+const PROBE_RE =
+  /(\.env|wp-|wordpress|phpmyadmin|\.php([?/]|$)|\.asp|cgi-|\.git\/|etc\/passwd|shell|cmd\.exe|\.sql|phpinfo|adminer|\.bak|\.old|setup\.php|eval\(|base64_decode|<script)/i;
+const bannedIps = new Map(); // ip → until ts
+setInterval(() => {
+  const n = Date.now();
+  for (const [ip, t] of bannedIps) if (t < n) bannedIps.delete(ip);
+}, 60 * 60 * 1000);
+app.use((req, res, next) => {
+  const ip = req.ip || "x";
+  const until = bannedIps.get(ip);
+  if (until && until > Date.now()) return res.status(404).end();
+  const target = String(req.originalUrl || req.url || "");
+  if (PROBE_RE.test(target)) {
+    bannedIps.set(ip, Date.now() + 24 * 60 * 60 * 1000);
+    console.warn("probe-ban:", ip, target.slice(0, 80));
+    return res.status(404).end();
+  }
+  // App routes pe obvious non-browser tools → silent 404 (/v1 dev API khula hai)
+  if (!req.path.startsWith("/v1")) {
+    const ua = String(req.get("user-agent") || "");
+    if (
+      /^(curl\/|python-requests|httpie|wget\/|scrapy|go-http-client|postmanruntime|axios\/|node-fetch|undici|okhttp)/i.test(
+        ua
+      )
+    ) {
+      return res.status(404).end();
+    }
+  }
+  next();
+});
+
 app.use(
   cors({
     origin(origin, cb) {
