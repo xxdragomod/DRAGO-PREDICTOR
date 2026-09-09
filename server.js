@@ -979,8 +979,8 @@ async function requireApiKey(req, res, endpointName) {
     }
   }
 
-  // prediction/history: 2 req/min (free + pro dono) — autobet: 20 req/min
-  const cap = endpointName === "autobet" ? 20 : 2;
+  // prediction/history: 2 req/min (free + pro dono) — autobet: 6 req/min
+  const cap = endpointName === "autobet" ? 6 : 2;
   const rate = checkApiRateLimit(row.user_id, endpointName, cap);
 
   res.setHeader("X-RateLimit-Limit", String(rate.limit));
@@ -2626,8 +2626,16 @@ function requireAppSignature(mode) {
     const userIdHdr = String(req.get("x-user-id") || "").trim();
     const userNameHdr = String(req.get("x-user-name") || "").trim();
 
-    // App-requests pehle jaisi chalti hain — signature aaye to verify + log karo
-    if (sig && APP_SECRET && ts) {
+    // HARD ENFORCE: valid HMAC + fresh ts (±5 min) zaroori — warna silent 404.
+    // APP_SECRET env me set hone ke baad hi ye layer active hoti hai.
+    if (!sig || !ts || !APP_SECRET) {
+      return res.status(404).end();
+    }
+    const tsNum = Number(ts);
+    if (!isFinite(tsNum) || Math.abs(Date.now() - tsNum) > 5 * 60 * 1000) {
+      return res.status(404).end();
+    }
+    {
       const pathOnly = String(req.originalUrl || req.url || "").split("?")[0];
       const payload = buildSignPayload({
         method: req.method,
@@ -2641,12 +2649,45 @@ function requireAppSignature(mode) {
       const expected = hmacSign(payload);
       if (!timingSafeEqualStr(sig, expected)) {
         console.warn("signature mismatch", pathOnly);
+        return res.status(404).end();
       }
     }
 
     req.dragoMeta = { domain, appId, ts, nonce, userIdHdr, userNameHdr };
     next();
   };
+}
+
+// ─── Device binding: ek token ek device — sharing pe silent block + alert ──
+const devAlertTs = new Map();
+async function deviceGuard(req, res, next) {
+  try {
+    const dev = String(req.get("x-device-id") || "").slice(0, 64);
+    const decoded = decodeToken(bearerToken(req) || "");
+    if (!dev || !decoded || !decoded.id) return next(); // purana client → no block
+    const raw = await col.users.findOne({ id: Number(decoded.id) });
+    if (!raw) return next();
+    if (!raw.bound_device) {
+      col.users
+        .updateOne({ id: Number(decoded.id) }, { $set: { bound_device: dev } })
+        .catch(() => {});
+      return next();
+    }
+    if (String(raw.bound_device) === dev) return next();
+    // Doosra device → silent 404 + admin ko alert (1x/hour)
+    const now = Date.now();
+    const last = devAlertTs.get(decoded.id) || 0;
+    if (now - last > 3600e3) {
+      devAlertTs.set(decoded.id, now);
+      telegramApi("sendMessage", {
+        chat_id: TELEGRAM_ADMIN_CHAT_ID,
+        text: `🚨 DEVICE MISMATCH — User #${decoded.id} ka token doosre device pe use ho raha hai\nBound: ${String(raw.bound_device).slice(0, 24)}\nNew: ${dev.slice(0, 24)}\nPrediction silent-blocked.`,
+      }).catch(() => {});
+    }
+    return res.status(404).end();
+  } catch (e) {
+    return next();
+  }
 }
 
 // ─── App ────────────────────────────────────────────────────────────────────
@@ -2780,6 +2821,8 @@ app.use(
       "X-Client-Domain",
       "X-User-Id",
       "X-User-Name",
+      "X-Device-Id",
+      "x-device-id",
       "X-ABP-Ts",
       "X-ABP-Sig",
       "x-abp-ts",
@@ -2873,6 +2916,7 @@ function shieldCheck(req, res, next) {
   return res.status(403).json({ success: false, message: "Security check failed" });
 }
 app.use(["/wingo30s_prediction", "/prediction-quota"], shieldCheck);
+app.use(["/wingo30s_prediction", "/prediction-quota"], deviceGuard);
 // Market data (no JWT) — frontend prediction page ka live chart yahin se leta hai
 // (browser ko lottery API se direct CORS/Cloudflare 403 milta hai, isliye proxy)
 app.use("/market", sigPublic);
@@ -2884,6 +2928,26 @@ app.use("/order-status", sigPay);
 
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
+
+/**
+ * Device bind — login ke waqt FE batata hai ki ye device is user ka hai.
+ * Auth: Bearer JWT.
+ */
+app.post("/security/bind-device", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  const dev = String(
+    req.get("x-device-id") || (req.body && req.body.device) || ""
+  ).slice(0, 64);
+  if (!dev) return res.status(400).json({ success: false });
+  try {
+    await col.users.updateOne(
+      { id: Number(decoded.id) },
+      { $set: { bound_device: dev } }
+    );
+  } catch (e) {}
+  res.json({ success: true });
+});
 
 /**
  * ImgBB upload proxy — key sirf server env (IMGBB_KEY) me, client ko kabhi nahi milti.
