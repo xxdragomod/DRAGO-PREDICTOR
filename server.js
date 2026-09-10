@@ -769,8 +769,10 @@ function saveAnnouncement(a) {
 }
 
 /* ── Imgbb server-side upload (Telegram photo → public URL) ── */
-const IMGBB_API_KEY = "6142948bcadb2c67ba10e4f77fd96a72";
+// 🔒 SECURITY: key repo me hardcode nahi — Render env IMGBB_API_KEY se aati hai.
+const IMGBB_API_KEY = (process.env.IMGBB_API_KEY || "").trim();
 async function imgbbUploadBuffer(buf) {
+  if (!IMGBB_API_KEY) throw new Error("IMGBB_API_KEY not configured");
   const body = new URLSearchParams();
   body.append("key", IMGBB_API_KEY);
   body.append("image", buf.toString("base64"));
@@ -857,7 +859,7 @@ const FREE_PRED_LIMIT = 3;
 const FREE_API_HISTORY_LIMIT = 10;
 const SERVER_BRAND = "🐉 DRAGO PREDICTOR";
 
-/** Developer API rate limit: prediction/history 2 req/min (free + pro), autobet 20 req/min */
+/** Developer API rate limit: prediction/history 2 req/min (free + pro) */
 const API_RATE_WINDOW_MS = 60 * 1000;
 const apiRateBuckets = new Map(); // `${userId}:${endpoint}` → number[] timestamps
 
@@ -936,8 +938,9 @@ async function requireApiKey(req, res, endpointName) {
   const user = await dbFindUserById(row.user_id);
   const isPro = userIsPro(user);
 
-  // History: free + any pro. Prediction + AutoBet API: ONLY RX1 FOR PROFIT (₹900)
-  if (endpointName === "prediction" || endpointName === "autobet") {
+  // History: free + any pro. Prediction API: ONLY RX1 FOR PROFIT (₹900)
+  // (AutoBet ka apna API system hat gaya — widget ab gameplay page se chalta hai)
+  if (endpointName === "prediction") {
     const planKey = user && user.pro_plan ? String(user.pro_plan) : "";
     if (!isPro || planKey !== "profit") {
       res.status(403).json({
@@ -979,9 +982,8 @@ async function requireApiKey(req, res, endpointName) {
     }
   }
 
-  // prediction/history: 2 req/min (free + pro dono) — autobet: 30 req/min
-  // (auto-bet ke retry bursts ke liye zaroori; scraper ke liye key-BAN + logs hain)
-  const cap = endpointName === "autobet" ? 30 : 2;
+  // prediction/history: 2 req/min (free + pro dono)
+  const cap = 2;
   const rate = checkApiRateLimit(row.user_id, endpointName, cap);
 
   res.setHeader("X-RateLimit-Limit", String(rate.limit));
@@ -1728,6 +1730,32 @@ async function handleTelegramCallback(cb) {
       console.log("⛔ PERMA-BAN user=", uid);
     }
     return;
+  }
+
+  // 🔒 SECURITY: payment approve/deny + admin panel actions — SIRF admin chat se.
+  // Ye check pehle missing tha: spoofed webhook/callback se koi bhi order
+  // approve kar ke free Pro le sakta tha. Ab dono layers par guard hai
+  // (webhook secret + yahan admin chat-id verify).
+  if (
+    data === "stats:refresh" ||
+    data.startsWith("a:") ||
+    data.startsWith("d:") ||
+    data.startsWith("approve:") ||
+    data.startsWith("deny:")
+  ) {
+    if (!isTelegramAdmin(chatId)) {
+      console.warn(
+        "telegram callback REJECTED (not admin):",
+        String(chatId),
+        data.slice(0, 40)
+      );
+      await telegramApi("answerCallbackQuery", {
+        callback_query_id: cb.id,
+        text: "Not admin",
+        show_alert: true,
+      });
+      return;
+    }
   }
 
   let action = null;
@@ -2838,16 +2866,16 @@ app.use(
 );
 
 // Developer API (/v1): CORS * intentional — keep for public developer access
-app.use("/v1", (req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET, POST, OPTIONS"
-  );
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-API-Key, x-api-key, Accept, Origin, X-ABP-Ts, X-ABP-Sig, x-abp-ts, x-abp-sig"
-  );
+  app.use("/v1", (req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader(
+      "Access-Control-Allow-Methods",
+      "GET, POST, OPTIONS"
+    );
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization, X-API-Key, x-api-key, Accept, Origin"
+    );
   res.setHeader(
     "Access-Control-Expose-Headers",
     "X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset"
@@ -2944,27 +2972,6 @@ app.get("/security/sigtest", (req, res) => {
     APP_ID,
   ].join("\n");
   return res.status(timingSafeEqualStr(sig, hmacSign(payload)) ? 200 : 404).end();
-});
-
-/**
- * AutoBet Key — account-bound JWT (7 din), sirf ₹900 profit plan ke liye.
- * Widget isi key se chalta hai; har call pe plan server-side check hota hai.
- */
-app.post("/security/autobet-key", async (req, res) => {
-  const decoded = authUser(req, res);
-  if (!decoded) return;
-  const u = await dbFindUserById(decoded.id);
-  if (!u) return res.status(404).json({ success: false });
-  if (!userIsPro(u) || String(u.pro_plan || "") !== "profit") {
-    return res.status(403).json({
-      success: false,
-      message: "AutoBet Key sirf RX1 FOR PROFIT (₹900) plan ke liye hai.",
-    });
-  }
-  const key = jwt.sign({ id: u.id, scope: "autobet" }, JWT_SECRET, {
-    expiresIn: "7d",
-  });
-  res.json({ success: true, key });
 });
 
 /**
@@ -3774,6 +3781,26 @@ app.post("/manual-payment", async (req, res) => {
 app.post("/telegram-webhook", async (req, res) => {
   res.json({ ok: true });
   try {
+    // 🔒 SECURITY: Telegram webhooks "X-Telegram-Bot-Api-Secret-Token" header
+    // bhejte hain (setWebhook ke secret_token se). Ye check na ho to koi bhi
+    // attacker spoofed callback_query bhej ke payment approve karwa sakta tha.
+    // Bot long-polling use karta hai — webhook sirf tab valid jab secret match ho.
+    const expected = (process.env.TELEGRAM_WEBHOOK_SECRET || "").trim();
+    if (!expected) {
+      // Secret configured nahi hai → webhook process hi mat karo (long-polling active hai)
+      console.warn(
+        "telegram-webhook: rejected (TELEGRAM_WEBHOOK_SECRET not set — long-polling only mode)"
+      );
+      return;
+    }
+    const got = String(req.get("x-telegram-bot-api-secret-token") || "");
+    if (
+      got.length !== expected.length ||
+      !crypto.timingSafeEqual(Buffer.from(got), Buffer.from(expected))
+    ) {
+      console.warn("telegram-webhook: invalid secret token");
+      return;
+    }
     const cb = req.body && req.body.callback_query;
     if (cb) await handleTelegramCallback(cb);
   } catch (err) {
@@ -4484,107 +4511,22 @@ app.post("/win-feedback", async (req, res) => {
   res.json({ success: true });
 });
 
-/** Widget signature: djb2(secret|key|30s-bucket) — casual curl/scripting blocks. */
-const ABP_WIDGET_SIG_SECRET =
-  process.env.ABP_SIG_SECRET || "DRAGO_ABP_SIG_7f3k9q";
-function abpWidgetSig(apiKey, bucket) {
-  const str = ABP_WIDGET_SIG_SECRET + "|" + apiKey + "|" + bucket;
-  let h = 5381;
-  for (let i = 0; i < str.length; i++) {
-    h = ((h << 5) + h + str.charCodeAt(i)) | 0;
-  }
-  return (h >>> 0).toString(16);
-}
-
-/**
- * AutoBet widget prediction (API key + widget signature + ₹500+ plan)
- * GET /v1/autobet/predict
- * Auth: header X-API-Key OR ?api_key=  AND  X-ABP-Ts + X-ABP-Sig (widget only)
- * - plans ₹500+ (beginners/profit): unlimited
- * - ₹300 test plan / free: 403
- * NOTE: raw/developer prediction API (/v1/wingo30s/prediction) remains
- * RX1 FOR PROFIT (₹900) only — normal pro cannot fetch predictions via API.
- */
-app.get("/v1/autobet/predict", async (req, res) => {
-  const auth = await requireApiKey(req, res, "autobet");
-  if (!auth) return;
-
-  // ── Widget signature check (time-bound 30s buckets, ±2 skew) ──
-  const rawKey = String(
-    req.headers["x-api-key"] || req.query.api_key || ""
-  ).trim();
-  const ts = Number(req.headers["x-abp-ts"] || req.query.abp_ts || 0);
-  const sig = String(
-    req.headers["x-abp-sig"] || req.query.abp_sig || ""
-  ).toLowerCase();
-  const nowB = Math.floor(Date.now() / 30000);
-  let sigOk = false;
-  if (ts && sig) {
-    for (let b = nowB - 2; b <= nowB + 2; b++) {
-      if (abpWidgetSig(rawKey, b) === sig) {
-        sigOk = true;
-        break;
-      }
-    }
-  }
-  if (!sigOk) {
-    return res.status(401).json({
-      success: false,
-      message: "Widget verification failed — Auto Bet Pro extension required.",
-    });
-  }
-
-  // ── Plan gate: Auto Bet = ₹500+ plans only ──
-  const abUser = await dbFindUserById(auth.row.user_id);
-  const planAmt =
-    abUser && abUser.pro_plan && PLAN_CATALOG[abUser.pro_plan]
-      ? PLAN_CATALOG[abUser.pro_plan].amount
-      : 0;
-  if (planAmt < 500) {
-    return res.status(403).json({
-      success: false,
-      billing_required: true,
-      message:
-        "Auto Bet ₹500+ plan (RX1 FOR BEGINNERS / RX1 FOR PROFIT) me available hai. Upgrade karo.",
-      plan: abUser && abUser.pro_plan ? String(abUser.pro_plan) : "free",
-      required_min_amount: 500,
-    });
-  }
-
-  try {
-    const ban = await dbIsUserBanned(auth.row.user_id);
-    if (ban.banned) {
-      return res.status(403).json({
-        success: false,
-        banned: true,
-        message: "Account suspended due to security policy violation.",
-      });
-    }
-  } catch (e) {
-    console.warn("autobet ban-check:", e.message);
-  }
-
-  // ANY pro plan = unlimited auto-bet predictions (widget endpoint).
-  // Pro rate-limit (20 req/min) from requireApiKey still applies.
-
-  try {
-    const prediction = await fetchWingoPrediction();
-    const pred =
-      prediction && typeof prediction === "object" ? prediction : {};
-    res.json({ success: true, Server: SERVER_BRAND, data: pred });
-  } catch (err) {
-    console.error("v1 autobet predict:", err.message);
-    const status = err.status || 502;
-    res.status(status).json({
-      success: false,
-      Server: SERVER_BRAND,
-      message:
-        status === 503
-          ? "Prediction source not configured"
-          : "Failed to fetch prediction from source",
-    });
-  }
-});
+/* ───────────────────────────────────────────────────────────────────────────
+ * AUTOBET API SYSTEM — REMOVED
+ *
+ * Pehle yahan /v1/autobet/predict (X-API-Key + widget signature) aur
+ * /security/autobet-key (account-bound JWT) the. Ab Auto Bet Pro koi
+ * alag API/endpoint use NAHI karta:
+ *
+ *   • Gameplay page khud session-JWT se /wingo30s_prediction fetch karta
+ *     hai (background me) aur window.__DRAGO_PREDICTION__ me publish karta
+ *     hai + "drago:prediction" CustomEvent dispatch karta hai.
+ *   • Auto Bet Pro widget (bookmarklet) usi page par chal kar wahi se
+ *     prediction padhta hai — zero API call, zero API key.
+ *
+ * Isse ₹500 BEGINNERS pro users ko bhi "upgrade karo" nahi dikhta —
+ * jo bhi pro hai (₹500+), gameplay page par Auto Bet Pro chal jaata hai.
+ * ─────────────────────────────────────────────────────────────────────────── */
 
 /**
  * Check order status (Rupayex + local DB)
