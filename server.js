@@ -3001,7 +3001,7 @@ app.post("/security/bind-device", async (req, res) => {
 app.post("/imgbb-upload", async (req, res) => {
   const decoded = authUser(req, res);
   if (!decoded) return;
-  const KEY = process.env.IMGBB_KEY;
+  const KEY = process.env.IMGBB_KEY || process.env.IMGBB_API_KEY;
   const img = String((req.body && req.body.image) || "");
   if (!KEY) return res.status(500).json({ success: false, message: "upload not configured" });
   if (!img || img.length > 2500000)
@@ -4512,21 +4512,106 @@ app.post("/win-feedback", async (req, res) => {
 });
 
 /* ───────────────────────────────────────────────────────────────────────────
- * AUTOBET API SYSTEM — REMOVED
- *
- * Pehle yahan /v1/autobet/predict (X-API-Key + widget signature) aur
- * /security/autobet-key (account-bound JWT) the. Ab Auto Bet Pro koi
- * alag API/endpoint use NAHI karta:
- *
- *   • Gameplay page khud session-JWT se /wingo30s_prediction fetch karta
- *     hai (background me) aur window.__DRAGO_PREDICTION__ me publish karta
- *     hai + "drago:prediction" CustomEvent dispatch karta hai.
- *   • Auto Bet Pro widget (bookmarklet) usi page par chal kar wahi se
- *     prediction padhta hai — zero API call, zero API key.
- *
- * Isse ₹500 BEGINNERS pro users ko bhi "upgrade karo" nahi dikhta —
- * jo bhi pro hai (₹500+), gameplay page par Auto Bet Pro chal jaata hai.
+ * AUTOBET API SYSTEM (restored, account-bound):
+ *   • In-app: gameplay page background me /wingo30s_prediction fetch karke
+ *     localStorage drago_pred_live me publish karta hai — widget wahi padhta
+ *     hai (zero API call).
+ *   • External userscript (Kiwi): /v1/autobet/predict sirf AutoBet Key
+ *     (account-bound JWT, scope=autobet) se — dev API key se nahi.
  * ─────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * AutoBet Key — account-bound JWT (7 din), active PRO subscribers ke liye.
+ */
+app.post("/security/autobet-key", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  const u = await dbFindUserById(decoded.id);
+  if (!u) return res.status(404).json({ success: false });
+  if (!userIsPro(u)) {
+    return res.status(403).json({
+      success: false,
+      message: "AutoBet Key sirf PRO subscribers ke liye hai.",
+    });
+  }
+  const key = jwt.sign({ id: u.id, scope: "autobet" }, JWT_SECRET, {
+    expiresIn: "7d",
+  });
+  res.json({ success: true, key });
+});
+
+/**
+ * AutoBet widget prediction — account-bound AutoBet Key only.
+ * GET /v1/autobet/predict  (X-API-Key / ?api_key = AutoBet Key JWT)
+ */
+app.get("/v1/autobet/predict", async (req, res) => {
+  const rawKey = String(
+    req.headers["x-api-key"] || req.query.api_key || ""
+  ).trim();
+  if (!rawKey) {
+    return res.status(401).json({
+      success: false,
+      message: "AutoBet Key required — app ke Auto Bet page se copy karo.",
+    });
+  }
+  let abp = null;
+  try {
+    abp = jwt.verify(rawKey, JWT_SECRET);
+  } catch (e) {}
+  if (!abp || abp.scope !== "autobet" || !abp.id) {
+    return res.status(401).json({
+      success: false,
+      message: "Invalid AutoBet Key — app se nayi key generate karo.",
+    });
+  }
+  const abUser = await dbFindUserById(abp.id);
+  if (!abUser || !userIsPro(abUser)) {
+    return res.status(403).json({
+      success: false,
+      billing_required: true,
+      message: "Auto Bet Pro sirf PRO subscribers ke liye hai. Upgrade karo.",
+      plan: abUser && abUser.pro_plan ? String(abUser.pro_plan) : "free",
+      required_plan: "pro",
+    });
+  }
+  const rate = checkApiRateLimit(abUser.id, "autobet", 30);
+  if (!rate.ok) {
+    return res.status(429).json({
+      success: false,
+      message: "Rate limit: max 30 requests per minute",
+      reset_sec: rate.reset_sec,
+    });
+  }
+  try {
+    const ban = await dbIsUserBanned(abUser.id);
+    if (ban.banned) {
+      return res.status(403).json({
+        success: false,
+        banned: true,
+        message: "Account suspended due to security policy violation.",
+      });
+    }
+  } catch (e) {
+    console.warn("autobet ban-check:", e.message);
+  }
+  try {
+    const prediction = await fetchWingoPrediction();
+    const pred =
+      prediction && typeof prediction === "object" ? prediction : {};
+    res.json({ success: true, Server: SERVER_BRAND, data: pred });
+  } catch (err) {
+    console.error("v1 autobet predict:", err.message);
+    const status = err.status || 502;
+    res.status(status).json({
+      success: false,
+      Server: SERVER_BRAND,
+      message:
+        status === 503
+          ? "Prediction source not configured"
+          : "Failed to fetch prediction from source",
+    });
+  }
+});
 
 /**
  * Check order status (Rupayex + local DB)
