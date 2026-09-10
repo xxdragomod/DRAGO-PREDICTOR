@@ -936,8 +936,8 @@ async function requireApiKey(req, res, endpointName) {
   const user = await dbFindUserById(row.user_id);
   const isPro = userIsPro(user);
 
-  // History: free + any pro. Prediction API: ONLY RX1 FOR PROFIT (₹900)
-  if (endpointName === "prediction") {
+  // History: free + any pro. Prediction + AutoBet API: ONLY RX1 FOR PROFIT (₹900)
+  if (endpointName === "prediction" || endpointName === "autobet") {
     const planKey = user && user.pro_plan ? String(user.pro_plan) : "";
     if (!isPro || planKey !== "profit") {
       res.status(403).json({
