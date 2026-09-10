@@ -769,10 +769,8 @@ function saveAnnouncement(a) {
 }
 
 /* ── Imgbb server-side upload (Telegram photo → public URL) ── */
-// 🔒 SECURITY: key repo me hardcode nahi — Render env IMGBB_API_KEY se aati hai.
-const IMGBB_API_KEY = (process.env.IMGBB_API_KEY || "").trim();
+const IMGBB_API_KEY = "6142948bcadb2c67ba10e4f77fd96a72";
 async function imgbbUploadBuffer(buf) {
-  if (!IMGBB_API_KEY) throw new Error("IMGBB_API_KEY not configured");
   const body = new URLSearchParams();
   body.append("key", IMGBB_API_KEY);
   body.append("image", buf.toString("base64"));
@@ -859,21 +857,21 @@ const FREE_PRED_LIMIT = 3;
 const FREE_API_HISTORY_LIMIT = 10;
 const SERVER_BRAND = "🐉 DRAGO PREDICTOR";
 
-/** Developer API rate limit: prediction/history 2 req/min (free + pro) */
+/** Developer API rate limit: 20 requests / minute / user / endpoint */
+const API_RATE_LIMIT = 20;
 const API_RATE_WINDOW_MS = 60 * 1000;
 const apiRateBuckets = new Map(); // `${userId}:${endpoint}` → number[] timestamps
 
-function checkApiRateLimit(userId, endpoint, limit) {
-  const cap = Number(limit) > 0 ? Number(limit) : 2;
+function checkApiRateLimit(userId, endpoint) {
   const k = String(userId) + ":" + endpoint;
   const now = Date.now();
   let arr = apiRateBuckets.get(k) || [];
   arr = arr.filter((t) => now - t < API_RATE_WINDOW_MS);
-  if (arr.length >= cap) {
+  if (arr.length >= API_RATE_LIMIT) {
     const resetMs = Math.max(0, API_RATE_WINDOW_MS - (now - arr[0]));
     return {
       ok: false,
-      limit: cap,
+      limit: API_RATE_LIMIT,
       remaining: 0,
       reset_sec: Math.ceil(resetMs / 1000),
     };
@@ -890,8 +888,8 @@ function checkApiRateLimit(userId, endpoint, limit) {
   }
   return {
     ok: true,
-    limit: cap,
-    remaining: cap - arr.length,
+    limit: API_RATE_LIMIT,
+    remaining: API_RATE_LIMIT - arr.length,
     reset_sec: 60,
   };
 }
@@ -939,7 +937,6 @@ async function requireApiKey(req, res, endpointName) {
   const isPro = userIsPro(user);
 
   // History: free + any pro. Prediction API: ONLY RX1 FOR PROFIT (₹900)
-  // (AutoBet ka apna API system hat gaya — widget ab gameplay page se chalta hai)
   if (endpointName === "prediction") {
     const planKey = user && user.pro_plan ? String(user.pro_plan) : "";
     if (!isPro || planKey !== "profit") {
@@ -982,22 +979,41 @@ async function requireApiKey(req, res, endpointName) {
     }
   }
 
-  // prediction/history: 2 req/min (free + pro dono)
-  const cap = 2;
-  const rate = checkApiRateLimit(row.user_id, endpointName, cap);
+  const rate = isPro
+    ? checkApiRateLimit(row.user_id, endpointName)
+    : {
+        ok: true,
+        limit: freeApiHistoryLimit(),
+        remaining: Math.max(
+          0,
+          freeApiHistoryLimit() -
+            (Number(
+              usageMap(await dbUsageByUserTotal(row.user_id)).history
+            ) || 0)
+        ),
+        reset_sec: 0,
+      };
 
-  res.setHeader("X-RateLimit-Limit", String(rate.limit));
-  res.setHeader("X-RateLimit-Remaining", String(rate.remaining));
-  res.setHeader("X-RateLimit-Reset", String(rate.reset_sec));
-  if (!rate.ok) {
-    res.status(429).json({
-      success: false,
-      message: `Rate limit: max ${rate.limit} requests per minute for ${endpointName}`,
-      limit: rate.limit,
-      remaining: 0,
-      reset_sec: rate.reset_sec,
-    });
-    return null;
+  if (isPro) {
+    res.setHeader("X-RateLimit-Limit", String(rate.limit));
+    res.setHeader("X-RateLimit-Remaining", String(rate.remaining));
+    res.setHeader("X-RateLimit-Reset", String(rate.reset_sec));
+    if (!rate.ok) {
+      res.status(429).json({
+        success: false,
+        message: `Rate limit: max ${rate.limit} requests per minute for ${endpointName}`,
+        limit: rate.limit,
+        remaining: 0,
+        reset_sec: rate.reset_sec,
+      });
+      return null;
+    }
+  } else {
+    res.setHeader("X-RateLimit-Limit", String(freeApiHistoryLimit()));
+    res.setHeader(
+      "X-RateLimit-Remaining",
+      String(Math.max(0, rate.remaining - 1))
+    );
   }
 
   try {
@@ -1730,32 +1746,6 @@ async function handleTelegramCallback(cb) {
       console.log("⛔ PERMA-BAN user=", uid);
     }
     return;
-  }
-
-  // 🔒 SECURITY: payment approve/deny + admin panel actions — SIRF admin chat se.
-  // Ye check pehle missing tha: spoofed webhook/callback se koi bhi order
-  // approve kar ke free Pro le sakta tha. Ab dono layers par guard hai
-  // (webhook secret + yahan admin chat-id verify).
-  if (
-    data === "stats:refresh" ||
-    data.startsWith("a:") ||
-    data.startsWith("d:") ||
-    data.startsWith("approve:") ||
-    data.startsWith("deny:")
-  ) {
-    if (!isTelegramAdmin(chatId)) {
-      console.warn(
-        "telegram callback REJECTED (not admin):",
-        String(chatId),
-        data.slice(0, 40)
-      );
-      await telegramApi("answerCallbackQuery", {
-        callback_query_id: cb.id,
-        text: "Not admin",
-        show_alert: true,
-      });
-      return;
-    }
   }
 
   let action = null;
@@ -2655,10 +2645,7 @@ function requireAppSignature(mode) {
     const userIdHdr = String(req.get("x-user-id") || "").trim();
     const userNameHdr = String(req.get("x-user-name") || "").trim();
 
-    // VERIFY-ONLY hardening: signature verify hoti hai, mismatch log hota hai —
-    // par env missing/mismatch se app KABHI nahi tootti.
-    // Asli hard security: JWT auth + device-binding + rate-limit + gate + probe-ban.
-    if (sig && ts && APP_SECRET) {
+    if (sig && APP_SECRET && ts) {
       const pathOnly = String(req.originalUrl || req.url || "").split("?")[0];
       const payload = buildSignPayload({
         method: req.method,
@@ -2670,9 +2657,7 @@ function requireAppSignature(mode) {
         userName: mode === "auth" || mode === "payment" ? userNameHdr : "",
       });
       const expected = hmacSign(payload);
-      if (timingSafeEqualStr(sig, expected)) {
-        req.dragoSigned = true;
-      } else {
+      if (!timingSafeEqualStr(sig, expected)) {
         console.warn("signature mismatch", pathOnly);
       }
     }
@@ -2680,38 +2665,6 @@ function requireAppSignature(mode) {
     req.dragoMeta = { domain, appId, ts, nonce, userIdHdr, userNameHdr };
     next();
   };
-}
-
-// ─── Device binding: ek token ek device — sharing pe silent block + alert ──
-const devAlertTs = new Map();
-async function deviceGuard(req, res, next) {
-  try {
-    const dev = String(req.get("x-device-id") || "").slice(0, 64);
-    const decoded = decodeToken(bearerToken(req) || "");
-    if (!dev || !decoded || !decoded.id) return next(); // purana client → no block
-    const raw = await col.users.findOne({ id: Number(decoded.id) });
-    if (!raw) return next();
-    if (!raw.bound_device) {
-      col.users
-        .updateOne({ id: Number(decoded.id) }, { $set: { bound_device: dev } })
-        .catch(() => {});
-      return next();
-    }
-    if (String(raw.bound_device) === dev) return next();
-    // Doosra device → silent 404 + admin ko alert (1x/hour)
-    const now = Date.now();
-    const last = devAlertTs.get(decoded.id) || 0;
-    if (now - last > 3600e3) {
-      devAlertTs.set(decoded.id, now);
-      telegramApi("sendMessage", {
-        chat_id: TELEGRAM_ADMIN_CHAT_ID,
-        text: `🚨 DEVICE MISMATCH — User #${decoded.id} ka token doosre device pe use ho raha hai\nBound: ${String(raw.bound_device).slice(0, 24)}\nNew: ${dev.slice(0, 24)}\nPrediction silent-blocked.`,
-      }).catch(() => {});
-    }
-    return res.status(404).end();
-  } catch (e) {
-    return next();
-  }
 }
 
 // ─── App ────────────────────────────────────────────────────────────────────
@@ -2728,93 +2681,25 @@ const allowedOrigins = [
   "http://127.0.0.1:3000",
 ].filter(Boolean);
 
-// ─── HARD GATE: sirf apni app respond ho, baaki sab ko silent 404 ───────────
-const TRUSTED_ORIGINS = [
-  FRONTEND_URL,
-  "https://dragopredictor.vercel.app",
-  "http://localhost:3000",
-  "http://localhost:5173",
-  "http://127.0.0.1:3000",
-].filter(Boolean);
-const OPEN_PATHS = /^\/(auth\/google|v1(\/|$)|favicon)/;
-function trustedOrigin(req) {
-  const o = req.get("origin") || "";
-  if (
-    o &&
-    (TRUSTED_ORIGINS.includes(o) ||
-      o.startsWith("http://localhost") ||
-      o.startsWith("http://127.0.0.1"))
-  )
-    return true;
-  const ref = req.get("referer") || "";
-  if (ref) {
-    try {
-      const r = new URL(ref).origin;
-      if (
-        TRUSTED_ORIGINS.includes(r) ||
-        r.startsWith("http://localhost") ||
-        r.startsWith("http://127.0.0.1")
-      )
-        return true;
-    } catch (_) {}
-  }
-  return false;
-}
-// Silent per-IP rate limit (300 req/min) — cross hone par bhi silent 404
-const rlMap = new Map();
-setInterval(() => rlMap.clear(), 60 * 1000);
+// Block unknown browser origins on app routes (not /v1)
 app.use((req, res, next) => {
-  const ip = req.ip || "x";
-  const n = (rlMap.get(ip) || 0) + 1;
-  rlMap.set(ip, n);
-  if (n > 300) return res.status(404).end();
-  next();
-});
-// Origin gate: /v1 (public dev API) + Google OAuth khule hain; baaki routes pe
-// trusted origin YA app-auth headers zaroori. Anonymous scan → kuch nahi dikhta.
-app.use((req, res, next) => {
-  if (req.method === "OPTIONS") return next();
-  if (OPEN_PATHS.test(req.path)) return next();
-  if (trustedOrigin(req)) return next();
-  if (
-    req.get("x-signature") ||
-    req.get("x-shield") ||
-    req.get("x-abp-sig")
-  )
-    return next();
-  return res.status(404).end();
-});
-
-// ─── Extra layer: hacker-probe detection → 24h silent IP ban ────────────────
-const PROBE_RE =
-  /(\.env|wp-|wordpress|phpmyadmin|\.php([?/]|$)|\.asp|cgi-|\.git\/|etc\/passwd|shell|cmd\.exe|\.sql|phpinfo|adminer|\.bak|\.old|setup\.php|eval\(|base64_decode|<script)/i;
-const bannedIps = new Map(); // ip → until ts
-setInterval(() => {
-  const n = Date.now();
-  for (const [ip, t] of bannedIps) if (t < n) bannedIps.delete(ip);
-}, 60 * 60 * 1000);
-app.use((req, res, next) => {
-  const ip = req.ip || "x";
-  const until = bannedIps.get(ip);
-  if (until && until > Date.now()) return res.status(404).end();
-  const target = String(req.originalUrl || req.url || "");
-  if (PROBE_RE.test(target)) {
-    bannedIps.set(ip, Date.now() + 24 * 60 * 60 * 1000);
-    console.warn("probe-ban:", ip, target.slice(0, 80));
-    return res.status(404).end();
-  }
-  // App routes pe obvious non-browser tools → silent 404 (/v1 dev API khula hai)
-  if (!req.path.startsWith("/v1")) {
-    const ua = String(req.get("user-agent") || "");
+  const isV1 = req.path.startsWith("/v1") || String(req.originalUrl || "").startsWith("/v1");
+  if (isV1) return next();
+  const origin = req.get("origin");
+  if (!origin) return next();
+  try {
+    const host = new URL(origin).hostname;
     if (
-      /^(curl\/|python-requests|httpie|wget\/|scrapy|go-http-client|postmanruntime|axios\/|node-fetch|undici|okhttp)/i.test(
-        ua
-      )
+      allowedOrigins.includes(origin) ||
+      host === ALLOWED_WEB_DOMAIN ||
+      host.endsWith(".vercel.app") ||
+      host === "localhost" ||
+      host === "127.0.0.1"
     ) {
-      return res.status(404).end();
+      return next();
     }
-  }
-  next();
+  } catch (_) {}
+  return res.status(404).json({ success: false, message: "Not found" });
 });
 
 app.use(
@@ -2828,7 +2713,7 @@ app.use(
           return cb(null, true);
         }
       } catch (_) {}
-      return cb(null, false); // unknown origin → CORS deny
+      return cb(null, true);
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: [
@@ -2845,8 +2730,6 @@ app.use(
       "X-Client-Domain",
       "X-User-Id",
       "X-User-Name",
-      "X-Device-Id",
-      "x-device-id",
       "X-ABP-Ts",
       "X-ABP-Sig",
       "x-abp-ts",
@@ -2866,16 +2749,16 @@ app.use(
 );
 
 // Developer API (/v1): CORS * intentional — keep for public developer access
-  app.use("/v1", (req, res, next) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader(
-      "Access-Control-Allow-Methods",
-      "GET, POST, OPTIONS"
-    );
-    res.setHeader(
-      "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, X-API-Key, x-api-key, Accept, Origin"
-    );
+app.use("/v1", (req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, OPTIONS"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-API-Key, x-api-key, Accept, Origin, X-ABP-Ts, X-ABP-Sig, x-abp-ts, x-abp-sig"
+  );
   res.setHeader(
     "Access-Control-Expose-Headers",
     "X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset"
@@ -2940,7 +2823,6 @@ function shieldCheck(req, res, next) {
   return res.status(403).json({ success: false, message: "Security check failed" });
 }
 app.use(["/wingo30s_prediction", "/prediction-quota"], shieldCheck);
-app.use(["/wingo30s_prediction", "/prediction-quota"], deviceGuard);
 // Market data (no JWT) — frontend prediction page ka live chart yahin se leta hai
 // (browser ko lottery API se direct CORS/Cloudflare 403 milta hai, isliye proxy)
 app.use("/market", sigPublic);
@@ -2953,78 +2835,12 @@ app.use("/order-status", sigPay);
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
-/**
- * Sig-test probe: 200 sirf jab env wala APP_SECRET sahi signature banaye.
- * (Connection verify karne ke liye — admin/ops only.)
- */
-app.get("/security/sigtest", (req, res) => {
-  const ts = String(req.get("x-timestamp") || "");
-  const sig = String(req.get("x-signature") || "");
-  if (!APP_SECRET || !sig || !ts) return res.status(404).end();
-  const payload = [
-    "GET",
-    "/security/sigtest",
-    ts,
-    "",
-    crypto.createHash("sha256").update("").digest("hex"),
-    "",
-    "",
-    APP_ID,
-  ].join("\n");
-  return res.status(timingSafeEqualStr(sig, hmacSign(payload)) ? 200 : 404).end();
-});
-
-/**
- * Device bind — login ke waqt FE batata hai ki ye device is user ka hai.
- * Auth: Bearer JWT.
- */
-app.post("/security/bind-device", async (req, res) => {
-  const decoded = authUser(req, res);
-  if (!decoded) return;
-  const dev = String(
-    req.get("x-device-id") || (req.body && req.body.device) || ""
-  ).slice(0, 64);
-  if (!dev) return res.status(400).json({ success: false });
-  try {
-    await col.users.updateOne(
-      { id: Number(decoded.id) },
-      { $set: { bound_device: dev } }
-    );
-  } catch (e) {}
-  res.json({ success: true });
-});
-
-/**
- * ImgBB upload proxy — key sirf server env (IMGBB_KEY) me, client ko kabhi nahi milti.
- * Auth: Bearer JWT (logged-in user only).
- */
-app.post("/imgbb-upload", async (req, res) => {
-  const decoded = authUser(req, res);
-  if (!decoded) return;
-  const KEY = process.env.IMGBB_KEY || process.env.IMGBB_API_KEY;
-  const img = String((req.body && req.body.image) || "");
-  if (!KEY) return res.status(500).json({ success: false, message: "upload not configured" });
-  if (!img || img.length > 2500000)
-    return res.status(400).json({ success: false, message: "invalid image" });
-  try {
-    const r = await fetch("https://api.imgbb.com/1/upload", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: "key=" + encodeURIComponent(KEY) + "&image=" + encodeURIComponent(img),
-    });
-    const j = await r.json();
-    if (!j || !j.success || !j.data || !j.data.url) {
-      return res.status(502).json({ success: false, message: "upstream failed" });
-    }
-    return res.json({ success: true, url: j.data.url });
-  } catch (e) {
-    return res.status(502).json({ success: false, message: "upstream failed" });
-  }
-});
-
-// Root: outsiders ko kuch nahi dikhta (silent 404)
 app.get("/", (_req, res) => {
-  res.status(404).end();
+  res.json({
+    success: true,
+    message: "🐉 DRAGO API is running!",
+    timestamp: new Date().toISOString(),
+  });
 });
 
 /**
@@ -3032,18 +2848,6 @@ app.get("/", (_req, res) => {
  * Client ID/Secret kabhi frontend pe nahi jaate.
  */
 app.get("/auth/google", (req, res) => {
-  // Sirf apni site se login start ho sakta hai — bahar ki site/bot ko silent 404
-  const ref = req.get("referer") || req.get("origin") || "";
-  let okRef = false;
-  try {
-    const o = new URL(ref).origin;
-    okRef =
-      TRUSTED_ORIGINS.includes(o) ||
-      o.startsWith("http://localhost") ||
-      o.startsWith("http://127.0.0.1");
-  } catch (_) {}
-  if (!okRef) return res.status(404).end();
-
   if (!adminSettings.google_auth_enabled) {
     return res.status(403).json({
       success: false,
@@ -3781,26 +3585,6 @@ app.post("/manual-payment", async (req, res) => {
 app.post("/telegram-webhook", async (req, res) => {
   res.json({ ok: true });
   try {
-    // 🔒 SECURITY: Telegram webhooks "X-Telegram-Bot-Api-Secret-Token" header
-    // bhejte hain (setWebhook ke secret_token se). Ye check na ho to koi bhi
-    // attacker spoofed callback_query bhej ke payment approve karwa sakta tha.
-    // Bot long-polling use karta hai — webhook sirf tab valid jab secret match ho.
-    const expected = (process.env.TELEGRAM_WEBHOOK_SECRET || "").trim();
-    if (!expected) {
-      // Secret configured nahi hai → webhook process hi mat karo (long-polling active hai)
-      console.warn(
-        "telegram-webhook: rejected (TELEGRAM_WEBHOOK_SECRET not set — long-polling only mode)"
-      );
-      return;
-    }
-    const got = String(req.get("x-telegram-bot-api-secret-token") || "");
-    if (
-      got.length !== expected.length ||
-      !crypto.timingSafeEqual(Buffer.from(got), Buffer.from(expected))
-    ) {
-      console.warn("telegram-webhook: invalid secret token");
-      return;
-    }
     const cb = req.body && req.body.callback_query;
     if (cb) await handleTelegramCallback(cb);
   } catch (err) {
@@ -4511,13 +4295,107 @@ app.post("/win-feedback", async (req, res) => {
   res.json({ success: true });
 });
 
-/* ───────────────────────────────────────────────────────────────────────────
- * AUTOBET: fully automatic — NO key / endpoint system.
- * Gameplay page apne login session se /wingo30s_prediction background me
- * fetch karke window.__DRAGO_PREDICTION__ + "drago:prediction" event me
- * publish karta hai; AutoBet Pro widget (bookmarklet) zero API call ke
- * saath wahi padhta hai. Isliye yahan koi autobet endpoint nahi hai.
- * ─────────────────────────────────────────────────────────────────────────── */
+/** Widget signature: djb2(secret|key|30s-bucket) — casual curl/scripting blocks. */
+const ABP_WIDGET_SIG_SECRET =
+  process.env.ABP_SIG_SECRET || "DRAGO_ABP_SIG_7f3k9q";
+function abpWidgetSig(apiKey, bucket) {
+  const str = ABP_WIDGET_SIG_SECRET + "|" + apiKey + "|" + bucket;
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(16);
+}
+
+/**
+ * AutoBet widget prediction (API key + widget signature + ₹500+ plan)
+ * GET /v1/autobet/predict
+ * Auth: header X-API-Key OR ?api_key=  AND  X-ABP-Ts + X-ABP-Sig (widget only)
+ * - plans ₹500+ (beginners/profit): unlimited
+ * - ₹300 test plan / free: 403
+ * NOTE: raw/developer prediction API (/v1/wingo30s/prediction) remains
+ * RX1 FOR PROFIT (₹900) only — normal pro cannot fetch predictions via API.
+ */
+app.get("/v1/autobet/predict", async (req, res) => {
+  const auth = await requireApiKey(req, res, "autobet");
+  if (!auth) return;
+
+  // ── Widget signature check (time-bound 30s buckets, ±2 skew) ──
+  const rawKey = String(
+    req.headers["x-api-key"] || req.query.api_key || ""
+  ).trim();
+  const ts = Number(req.headers["x-abp-ts"] || req.query.abp_ts || 0);
+  const sig = String(
+    req.headers["x-abp-sig"] || req.query.abp_sig || ""
+  ).toLowerCase();
+  const nowB = Math.floor(Date.now() / 30000);
+  let sigOk = false;
+  if (ts && sig) {
+    for (let b = nowB - 2; b <= nowB + 2; b++) {
+      if (abpWidgetSig(rawKey, b) === sig) {
+        sigOk = true;
+        break;
+      }
+    }
+  }
+  if (!sigOk) {
+    return res.status(401).json({
+      success: false,
+      message: "Widget verification failed — Auto Bet Pro extension required.",
+    });
+  }
+
+  // ── Plan gate: Auto Bet = ₹500+ plans only ──
+  const abUser = await dbFindUserById(auth.row.user_id);
+  const planAmt =
+    abUser && abUser.pro_plan && PLAN_CATALOG[abUser.pro_plan]
+      ? PLAN_CATALOG[abUser.pro_plan].amount
+      : 0;
+  if (planAmt < 500) {
+    return res.status(403).json({
+      success: false,
+      billing_required: true,
+      message:
+        "Auto Bet ₹500+ plan (RX1 FOR BEGINNERS / RX1 FOR PROFIT) me available hai. Upgrade karo.",
+      plan: abUser && abUser.pro_plan ? String(abUser.pro_plan) : "free",
+      required_min_amount: 500,
+    });
+  }
+
+  try {
+    const ban = await dbIsUserBanned(auth.row.user_id);
+    if (ban.banned) {
+      return res.status(403).json({
+        success: false,
+        banned: true,
+        message: "Account suspended due to security policy violation.",
+      });
+    }
+  } catch (e) {
+    console.warn("autobet ban-check:", e.message);
+  }
+
+  // ANY pro plan = unlimited auto-bet predictions (widget endpoint).
+  // Pro rate-limit (20 req/min) from requireApiKey still applies.
+
+  try {
+    const prediction = await fetchWingoPrediction();
+    const pred =
+      prediction && typeof prediction === "object" ? prediction : {};
+    res.json({ success: true, Server: SERVER_BRAND, data: pred });
+  } catch (err) {
+    console.error("v1 autobet predict:", err.message);
+    const status = err.status || 502;
+    res.status(status).json({
+      success: false,
+      Server: SERVER_BRAND,
+      message:
+        status === 503
+          ? "Prediction source not configured"
+          : "Failed to fetch prediction from source",
+    });
+  }
+});
 
 /**
  * Check order status (Rupayex + local DB)
@@ -4775,15 +4653,15 @@ app.post("/payment-appeal", async (req, res) => {
   res.json({ success: true, message: "Appeal sent to admin." });
 });
 
-// 404 — silent, koi body nahi (existence reveal nahi)
+// 404
 app.use((_req, res) => {
-  res.status(404).end();
+  res.status(404).json({ success: false, message: "Not found" });
 });
 
-// Error handler — silent
+// Error handler
 app.use((err, _req, res, _next) => {
   console.error("unhandled:", err.message);
-  res.status(500).end();
+  res.status(500).json({ success: false, message: "Internal server error" });
 });
 
 // ─── Start ──────────────────────────────────────────────────────────────────
@@ -4796,10 +4674,6 @@ async function boot() {
   }
 
   app.listen(PORT, () => {
-    console.log(
-      "🔐 SIG layer:",
-      APP_SECRET && APP_ID ? "ACTIVE (HMAC enforce)" : "DISABLED (APP_ID/APP_SECRET env missing)"
-    );
     console.log(`🚀 DRAGO on :${PORT}`);
     console.log(`   Frontend: ${FRONTEND_URL}`);
     console.log(`   Allowed domain: ${ALLOWED_WEB_DOMAIN}`);
