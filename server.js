@@ -2947,6 +2947,27 @@ app.get("/security/sigtest", (req, res) => {
 });
 
 /**
+ * AutoBet Key — account-bound JWT (7 din), sirf ₹900 profit plan ke liye.
+ * Widget isi key se chalta hai; har call pe plan server-side check hota hai.
+ */
+app.post("/security/autobet-key", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  const u = await dbFindUserById(decoded.id);
+  if (!u) return res.status(404).json({ success: false });
+  if (!userIsPro(u) || String(u.pro_plan || "") !== "profit") {
+    return res.status(403).json({
+      success: false,
+      message: "AutoBet Key sirf RX1 FOR PROFIT (₹900) plan ke liye hai.",
+    });
+  }
+  const key = jwt.sign({ id: u.id, scope: "autobet" }, JWT_SECRET, {
+    expiresIn: "7d",
+  });
+  res.json({ success: true, key });
+});
+
+/**
  * Device bind — login ke waqt FE batata hai ki ye device is user ka hai.
  * Auth: Bearer JWT.
  */
