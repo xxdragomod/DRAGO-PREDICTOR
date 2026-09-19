@@ -92,7 +92,8 @@ const TELEGRAM_ADMIN_CHAT_ID = String(
   process.env.TELEGRAM_ADMIN_CHAT_ID || ""
 ).trim();
 /** Pending payment window (gateway + manual) */
-const PAYMENT_TTL_MS = 10 * 60 * 1000;
+const UPI_ID = process.env.UPI_ID || "dragoxkrish@nyes";
+const PAYMENT_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 din — payment ID appeal window
 
 if (!GOOGLE_CLIENT_ID || !JWT_SECRET) {
   console.error("❌ GOOGLE_CLIENT_ID aur JWT_SECRET set karo (Render env)");
@@ -3385,7 +3386,7 @@ app.get("/payment-config", (req, res) => {
     amount: plan.amount,
     days: plan.days,
     qr_url: plan.qr_url || null,
-    ttl_minutes: 10,
+    ttl_minutes: 43200, upi_id: UPI_ID,
   });
 });
 
@@ -3907,7 +3908,7 @@ app.post("/manual-payment/start", (req, res) => {
         amount: plan.amount,
         qr_url: plan.qr_url || null,
         name: plan.name,
-        ttl_minutes: 10,
+        ttl_minutes: 43200, upi_id: UPI_ID,
         payment_status: "PENDING",
         reused: true,
       });
@@ -3935,7 +3936,7 @@ app.post("/manual-payment/start", (req, res) => {
       amount: plan.amount,
       qr_url: plan.qr_url || null,
       name: plan.name,
-      ttl_minutes: 10,
+      ttl_minutes: 43200, upi_id: UPI_ID,
       payment_status: "PENDING",
     });
   } catch (err) {
