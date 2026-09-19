@@ -1246,7 +1246,7 @@ function expireStaleOrders() {
 
 // ─── WinGo data: proxy-only to orihost VPS (no local save) ─────────────────
 // Prediction + history dono VPS se aate hain. Render sirf forward karta hai.
-const WINGO_HISTORY_MAX = 1000;
+const WINGO_HISTORY_MAX = 10000;
 
 // Last good prediction — upstream (VPS) fail ho to stale fallback serve karte
 let predCache = { at: 0, prediction: null, fetched_at: "" };
