@@ -1638,7 +1638,8 @@ async function handleTelegramCallback(cb) {
                 callback_data: "cfg:winfb",
               },
             ],
-            [{ text: "🔄 Refresh", callback_data: "cfg:refresh" }],
+            [{ text: "👥 Users Manage", callback_data: "users:list" }],
+        [{ text: "🔄 Refresh", callback_data: "cfg:refresh" }],
           ],
         },
       });
@@ -1744,6 +1745,152 @@ async function handleTelegramCallback(cb) {
         });
       }
       console.log("⛔ PERMA-BAN user=", uid);
+    }
+    return;
+  }
+
+  // ── USER MANAGEMENT: pro grant / pro band / ban / unban ──
+  async function showUserMenu(uid, cId, mId) {
+    const u = await dbFindUserById(uid);
+    if (!u) {
+      await telegramApi("editMessageText", {
+        chat_id: cId,
+        message_id: mId,
+        text: "❌ User #" + uid + " nahi mila.",
+        reply_markup: {
+          inline_keyboard: [[{ text: "← Users", callback_data: "users:list" }]],
+        },
+      });
+      return;
+    }
+    const ban = await dbIsUserBanned(uid);
+    const exp = u.pro_expires_at
+      ? new Date(u.pro_expires_at).toLocaleDateString("en-IN", {
+          day: "numeric", month: "short", year: "numeric",
+        })
+      : "—";
+    const planName =
+      u.pro_plan && PLAN_CATALOG[u.pro_plan] ? PLAN_CATALOG[u.pro_plan].name : u.pro_plan;
+    const txt =
+      "👤 " + (u.name || u.email || "User") + " (#" + u.id + ")\n" +
+      "📧 " + (u.email || "—") + "\n" +
+      "📦 Plan: " + (u.is_pro ? planName || "PRO" : "FREE") + "\n" +
+      (u.is_pro ? "🟢 Pro ACTIVE till " + exp : "⚪ Pro nahi hai") + "\n" +
+      (ban.banned ? "⛔ BANNED" : "✅ Not banned");
+    const kb = [
+      [
+        { text: "₹300 · 3d", callback_data: "up:" + u.id + ":test" },
+        { text: "₹500 · 7d", callback_data: "up:" + u.id + ":beginners" },
+        { text: "₹900 · 15d", callback_data: "up:" + u.id + ":profit" },
+      ],
+      [{ text: "❌ Pro band karo", callback_data: "up:" + u.id + ":none" }],
+      [
+        ban.banned
+          ? { text: "🔓 UNBAN user", callback_data: "ub:" + u.id }
+          : { text: "⛔ BAN user", callback_data: "bb:" + u.id },
+      ],
+      [{ text: "← Users list", callback_data: "users:list" }],
+    ];
+    await telegramApi("editMessageText", {
+      chat_id: cId,
+      message_id: mId,
+      text: txt,
+      reply_markup: { inline_keyboard: kb },
+    });
+  }
+
+  if (
+    data === "users:list" ||
+    data === "users:panel" ||
+    data.startsWith("users:page:") ||
+    data.startsWith("u:") ||
+    data.startsWith("up:")
+  ) {
+    if (!isTelegramAdmin(chatId)) {
+      await telegramApi("answerCallbackQuery", {
+        callback_query_id: cb.id,
+        text: "Not admin",
+        show_alert: true,
+      });
+      return;
+    }
+    await telegramApi("answerCallbackQuery", { callback_query_id: cb.id });
+
+    if (data === "users:panel") {
+      await sendAdminPanel(chatId);
+      return;
+    }
+
+    if (data === "users:list" || data.startsWith("users:page:")) {
+      const page = data.startsWith("users:page:")
+        ? Math.max(0, Number(data.slice(11)) || 0)
+        : 0;
+      const rows = await col.users
+        .find({})
+        .sort({ id: -1 })
+        .skip(page * 8)
+        .limit(8)
+        .toArray();
+      const total = await col.users.countDocuments({});
+      const kb = [];
+      for (const u of rows) {
+        kb.push([
+          {
+            text:
+              "👤 " + String(u.name || u.email || "user").slice(0, 16) +
+              " #" + u.id + (u.is_pro ? " 🟢" : ""),
+            callback_data: "u:" + u.id,
+          },
+        ]);
+      }
+      const nav = [];
+      if (page > 0) nav.push({ text: "‹ Prev", callback_data: "users:page:" + (page - 1) });
+      if (page * 8 + 8 < total) nav.push({ text: "Next ›", callback_data: "users:page:" + (page + 1) });
+      if (nav.length) kb.push(nav);
+      kb.push([{ text: "← Panel", callback_data: "users:panel" }]);
+      await telegramApi("editMessageText", {
+        chat_id: chatId,
+        message_id: msgId,
+        text: "👥 Users (page " + (page + 1) + ") — user select karo:",
+        reply_markup: { inline_keyboard: kb },
+      });
+      return;
+    }
+
+    if (data.startsWith("up:")) {
+      const parts = data.split(":");
+      const uid = Number(parts[1]);
+      const plan = parts[2];
+      if (plan === "none") {
+        await dbSetUserPro(uid, false, null, null);
+        await telegramApi("answerCallbackQuery", {
+          callback_query_id: cb.id,
+          text: "❌ Pro band — user ab FREE hai",
+          show_alert: true,
+        });
+      } else if (PLAN_CATALOG[plan]) {
+        const p = PLAN_CATALOG[plan];
+        const expIso = new Date(Date.now() + p.days * 86400000).toISOString();
+        await dbSetUserPro(uid, true, plan, expIso);
+        await telegramApi("answerCallbackQuery", {
+          callback_query_id: cb.id,
+          text: "✅ PRO " + p.name + " (" + p.days + " din) grant ho gaya",
+          show_alert: true,
+        });
+      } else {
+        await telegramApi("answerCallbackQuery", {
+          callback_query_id: cb.id,
+          text: "Bad plan",
+        });
+        return;
+      }
+      await showUserMenu(uid, chatId, msgId);
+      return;
+    }
+
+    if (data.startsWith("u:")) {
+      await showUserMenu(Number(data.slice(2)), chatId, msgId);
+      return;
     }
     return;
   }
@@ -2374,6 +2521,7 @@ async function sendAdminPanel(chatId) {
         ],
         [{ text: "📢 New Announcement", callback_data: "act:announce" }],
         [{ text: "📢 New Announcement", callback_data: "act:announce" }],
+        [{ text: "👥 Users Manage", callback_data: "users:list" }],
         [{ text: "🔄 Refresh", callback_data: "cfg:refresh" }],
       ],
     },
