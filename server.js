@@ -1751,8 +1751,8 @@ async function handleTelegramCallback(cb) {
 
   // ── USER MANAGEMENT: pro grant / pro band / ban / unban ──
   async function showUserMenu(uid, cId, mId) {
-    const u = await dbFindUserById(uid);
-    if (!u) {
+    const p = await userDocMenuPayload(uid);
+    if (!p) {
       await telegramApi("editMessageText", {
         chat_id: cId,
         message_id: mId,
@@ -1763,46 +1763,21 @@ async function handleTelegramCallback(cb) {
       });
       return;
     }
-    const ban = await dbIsUserBanned(uid);
-    const exp = u.pro_expires_at
-      ? new Date(u.pro_expires_at).toLocaleDateString("en-IN", {
-          day: "numeric", month: "short", year: "numeric",
-        })
-      : "—";
-    const planName =
-      u.pro_plan && PLAN_CATALOG[u.pro_plan] ? PLAN_CATALOG[u.pro_plan].name : u.pro_plan;
-    const txt =
-      "👤 " + (u.name || u.email || "User") + " (#" + u.id + ")\n" +
-      "📧 " + (u.email || "—") + "\n" +
-      "📦 Plan: " + (u.is_pro ? planName || "PRO" : "FREE") + "\n" +
-      (u.is_pro ? "🟢 Pro ACTIVE till " + exp : "⚪ Pro nahi hai") + "\n" +
-      (ban.banned ? "⛔ BANNED" : "✅ Not banned");
-    const kb = [
-      [
-        { text: "₹300 · 3d", callback_data: "up:" + u.id + ":test" },
-        { text: "₹500 · 7d", callback_data: "up:" + u.id + ":beginners" },
-        { text: "₹900 · 15d", callback_data: "up:" + u.id + ":profit" },
-      ],
-      [{ text: "❌ Pro band karo", callback_data: "up:" + u.id + ":none" }],
-      [
-        ban.banned
-          ? { text: "🔓 UNBAN user", callback_data: "ub:" + u.id }
-          : { text: "⛔ BAN user", callback_data: "bb:" + u.id },
-      ],
-      [{ text: "← Users list", callback_data: "users:list" }],
-    ];
     await telegramApi("editMessageText", {
       chat_id: cId,
       message_id: mId,
-      text: txt,
-      reply_markup: { inline_keyboard: kb },
+      text: p.text,
+      reply_markup: { inline_keyboard: p.keyboard },
     });
   }
 
   if (
     data === "users:list" ||
     data === "users:panel" ||
+    data === "users:search" ||
+    data === "users:pro" ||
     data.startsWith("users:page:") ||
+    data.startsWith("users:propage:") ||
     data.startsWith("u:") ||
     data.startsWith("up:")
   ) {
@@ -1821,6 +1796,63 @@ async function handleTelegramCallback(cb) {
       return;
     }
 
+    if (data === "users:search") {
+      tgConversations.set(String(chatId), {
+        step: "usersearch",
+        data: {},
+        expires: Date.now() + 10 * 60 * 1000,
+      });
+      await tgReply(
+        chatId,
+        "🔍 User search\n\nUser ID, email ya naam bhejo.\n\n(or /cancel)"
+      );
+      return;
+    }
+
+    if (data === "users:pro" || data.startsWith("users:propage:")) {
+      const page = data.startsWith("users:propage:")
+        ? Math.max(0, Number(data.slice(14)) || 0)
+        : 0;
+      const rows = await col.users
+        .find({ is_pro: 1 })
+        .sort({ id: -1 })
+        .skip(page * 8)
+        .limit(8)
+        .toArray();
+      const total = await col.users.countDocuments({ is_pro: 1 });
+      const kb = [];
+      for (const u of rows) {
+        const pn =
+          u.pro_plan && PLAN_CATALOG[u.pro_plan]
+            ? PLAN_CATALOG[u.pro_plan].name
+            : "PRO";
+        kb.push([
+          {
+            text:
+              "⭐ #" + u.id + " · " + String(u.name || u.email || "user").slice(0, 14) +
+              " · " + pn.replace("RX1 FOR ", ""),
+            callback_data: "u:" + u.id,
+          },
+        ]);
+      }
+      if (!kb.length) kb.push([{ text: "🤷 Koi pro user nahi", callback_data: "users:panel" }]);
+      const nav = [];
+      if (page > 0) nav.push({ text: "‹ Prev", callback_data: "users:propage:" + (page - 1) });
+      if (page * 8 + 8 < total) nav.push({ text: "Next ›", callback_data: "users:propage:" + (page + 1) });
+      if (nav.length) kb.push(nav);
+      kb.push([
+        { text: "👥 All users", callback_data: "users:list" },
+        { text: "← Panel", callback_data: "users:panel" },
+      ]);
+      await telegramApi("editMessageText", {
+        chat_id: chatId,
+        message_id: msgId,
+        text: "⭐ PRO USERS (" + total + ") — page " + (page + 1) + ":",
+        reply_markup: { inline_keyboard: kb },
+      });
+      return;
+    }
+
     if (data === "users:list" || data.startsWith("users:page:")) {
       const page = data.startsWith("users:page:")
         ? Math.max(0, Number(data.slice(11)) || 0)
@@ -1832,7 +1864,12 @@ async function handleTelegramCallback(cb) {
         .limit(8)
         .toArray();
       const total = await col.users.countDocuments({});
-      const kb = [];
+      const kb = [
+        [
+          { text: "🔍 Search user", callback_data: "users:search" },
+          { text: "⭐ Pro users", callback_data: "users:pro" },
+        ],
+      ];
       for (const u of rows) {
         kb.push([
           {
@@ -2072,6 +2109,54 @@ async function handleTelegramMessage(msg) {
   if (lower === "/cancel") {
     tgConversations.delete(String(chatId));
     await tgReply(chatId, "Cancelled.");
+    return;
+  }
+
+  if (conv && conv.expires > Date.now() && conv.step === "usersearch") {
+    tgConversations.delete(String(chatId));
+    const q = text.trim();
+    let rows = [];
+    if (/^\d+$/.test(q)) {
+      const one = await dbFindUserById(Number(q));
+      if (one) rows = [one];
+    } else if (q.indexOf("@") !== -1) {
+      rows = await col.users
+        .find({ email: new RegExp(escRe(q), "i") })
+        .limit(6)
+        .toArray();
+    } else {
+      rows = await col.users
+        .find({ name: new RegExp(escRe(q), "i") })
+        .limit(6)
+        .toArray();
+    }
+    if (!rows.length) {
+      await tgReply(chatId, "❌ Koi user nahi mila: " + q);
+      return;
+    }
+    if (rows.length === 1) {
+      const u = rows[0];
+      const p = await userDocMenuPayload(u.id);
+      await telegramApi("sendMessage", {
+        chat_id: chatId,
+        text: p.text,
+        reply_markup: { inline_keyboard: p.keyboard },
+      });
+      return;
+    }
+    const kb = rows.map((u) => [
+      {
+        text:
+          "👤 #" + u.id + " · " + String(u.name || u.email || "user").slice(0, 20) +
+          (u.is_pro ? " 🟢" : ""),
+        callback_data: "u:" + u.id,
+      },
+    ]);
+    await telegramApi("sendMessage", {
+      chat_id: chatId,
+      text: "🔍 " + rows.length + " users mile — select karo:",
+      reply_markup: { inline_keyboard: kb },
+    });
     return;
   }
 
@@ -2407,6 +2492,47 @@ async function handleTelegramMessage(msg) {
     await tgReply(chatId, "✅ Free API history limit = " + adminSettings.free_api_history_limit);
     return;
   }
+}
+
+function escRe(t) {
+  return String(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function userDocMenuPayload(uid) {
+  const u = await dbFindUserById(uid);
+  if (!u) return null;
+  const ban = await dbIsUserBanned(uid);
+  const exp = u.pro_expires_at
+    ? new Date(u.pro_expires_at).toLocaleDateString("en-IN", {
+        day: "numeric", month: "short", year: "numeric",
+      })
+    : "—";
+  const planName =
+    u.pro_plan && PLAN_CATALOG[u.pro_plan] ? PLAN_CATALOG[u.pro_plan].name : u.pro_plan;
+  const text =
+    "👤 " + (u.name || u.email || "User") + "  ·  #" + u.id + "\n" +
+    "📧 " + (u.email || "—") + "\n" +
+    "📦 Plan: " + (u.is_pro ? planName || "PRO" : "FREE") + "\n" +
+    (u.is_pro ? "🟢 Pro ACTIVE till " + exp : "⚪ Pro nahi hai") + "\n" +
+    (ban.banned ? "⛔ BANNED" : "✅ Not banned");
+  const keyboard = [
+    [
+      { text: "🥉 ₹300 · 3d", callback_data: "up:" + u.id + ":test" },
+      { text: "🥈 ₹500 · 7d", callback_data: "up:" + u.id + ":beginners" },
+      { text: "🥇 ₹900 · 15d", callback_data: "up:" + u.id + ":profit" },
+    ],
+    [{ text: "❌ Pro band karo", callback_data: "up:" + u.id + ":none" }],
+    [
+      ban.banned
+        ? { text: "🔓 UNBAN user", callback_data: "ub:" + u.id }
+        : { text: "⛔ BAN user", callback_data: "bb:" + u.id },
+    ],
+    [
+      { text: "← Users", callback_data: "users:list" },
+      { text: "⭐ Pro list", callback_data: "users:pro" },
+    ],
+  ];
+  return { text, keyboard };
 }
 
 function adminPanelText() {
