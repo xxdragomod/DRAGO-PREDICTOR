@@ -21,6 +21,16 @@ dotenv.config({ path: path.join(__dirname, ".env") });
 dotenv.config({ path: path.join(__dirname, "env") });
 dotenv.config({ path: path.join(__dirname, "local.env") });
 
+app.disable("x-powered-by");
+app.use((req, res, next) => {
+  res.set({
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Cache-Control": "no-store",
+  });
+  next();
+});
 const PORT = Number(process.env.PORT) || 3000;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
