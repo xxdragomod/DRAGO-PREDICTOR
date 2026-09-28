@@ -2946,6 +2946,49 @@ function requireAppSignature(mode) {
 const app = express();
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
+/* ═══ SECURITY HARDENING ═══
+   - imgbb key sirf server-side (FE se hataya)
+   - per-user rate limits: uploads 10/hr, bug 5/hr, winfb 5/hr, appeal 10/day
+   - image validation: type + size (magic prefix + 4MB cap)                */
+const RL = new Map();
+function rateLimitUser(key, max, windowMs) {
+  const now = Date.now();
+  const rec = RL.get(key) || { t: now, n: 0 };
+  if (now - rec.t > windowMs) { rec.t = now; rec.n = 0; }
+  rec.n++;
+  RL.set(key, rec);
+  if (RL.size > 8000) RL.clear();
+  return rec.n <= max;
+}
+const IMGBB_SERVER_KEY = process.env.IMGBB_API_KEY || "6142948bcadb2c67ba10e4f77fd96a72";
+
+app.use("/upload-image", express.json({ limit: "6mb" }));
+app.post("/upload-image", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  if (!rateLimitUser("up:" + decoded.id, 10, 3600000))
+    return res.status(429).json({ success: false, message: "Too many uploads. Try later." });
+  const b64 = String((req.body && req.body.image) || "");
+  const m = b64.match(/^data:image\/(png|jpe?g|webp);base64,(.+)$/);
+  if (!m) return res.status(400).json({ success: false, message: "Only PNG/JPG/WEBP allowed." });
+  const buf = Buffer.from(m[2], "base64");
+  if (buf.length > 4 * 1024 * 1024)
+    return res.status(413).json({ success: false, message: "Image too large (max 4MB)." });
+  try {
+    const r = await fetch("https://api.imgbb.com/1/upload?key=" + IMGBB_SERVER_KEY, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "image=" + encodeURIComponent(m[2]),
+    });
+    const j = await r.json();
+    if (!j || !j.success || !j.data || !j.data.url)
+      return res.status(502).json({ success: false, message: "Upload failed." });
+    return res.json({ success: true, url: j.data.url });
+  } catch (e) {
+    return res.status(502).json({ success: false, message: "Upload failed." });
+  }
+});
+
 app.use(express.json({ limit: "32kb" }));
 
 const allowedOrigins = [
@@ -4537,6 +4580,8 @@ app.post("/rate-submit", async (req, res) => {
 app.post("/win-feedback", async (req, res) => {
   const decoded = authUser(req, res);
   if (!decoded) return;
+  if (!rateLimitUser("wf:" + decoded.id, 5, 3600000))
+    return res.status(429).json({ success: false, message: "Too many submissions. Try later." });
   const wins = Math.max(0, Number((req.body && req.body.wins) || 0) | 0);
   const imageUrl = String((req.body && req.body.image_url) || "").trim().slice(0, 500);
   const name = decoded.name || decoded.email || "User";
@@ -4578,6 +4623,8 @@ app.post("/win-feedback", async (req, res) => {
 app.post("/bug-report", async (req, res) => {
   const decoded = authUser(req, res);
   if (!decoded) return;
+  if (!rateLimitUser("br:" + decoded.id, 5, 3600000))
+    return res.status(429).json({ success: false, message: "Too many reports. Try later." });
   const category = String((req.body && req.body.category) || "")
     .trim()
     .slice(0, 60);
@@ -4736,6 +4783,10 @@ app.get("/order-status", async (req, res) => {
  * User claims payment not verified → Telegram admin alert
  */
 app.post("/payment-appeal", async (req, res) => {
+  const _tk = bearerToken(req);
+  const _ap = _tk ? decodeToken(_tk) : null;
+  if (_ap && !rateLimitUser("pa:" + _ap.id, 10, 86400000))
+    return res.status(429).json({ success: false, message: "Too many appeals today. Try tomorrow." });
   const decoded = authUser(req, res);
   if (!decoded) return;
 
