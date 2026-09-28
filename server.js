@@ -37,6 +37,8 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const JWT_SECRET = process.env.JWT_SECRET;
 const APP_ID = process.env.APP_ID || process.env.DRAGO_APP_ID || "";
 const APP_SECRET = process.env.APP_SECRET || process.env.DRAGO_APP_SECRET || "";
+const APP_ID_PREV = process.env.APP_ID_PREV || "";
+const APP_SECRET_PREV = process.env.APP_SECRET_PREV || "";
 const FRONTEND_URL = (
   process.env.FRONTEND_URL || "https://dragopredictor.vercel.app"
 ).replace(/\/$/, "");
@@ -219,7 +221,16 @@ function decKey(s) {
     p = Buffer.concat([p, d.final()]);
     return p.toString("utf8");
   } catch (_) {
-    return null;
+    if (!APP_SECRET_PREV) return null;
+    try {
+      const [i2, t2, e2] = String(s || "").split(".");
+      const k2 = Buffer.from(String(APP_SECRET_PREV).slice(0, 32).padEnd(32, "0"));
+      const d2 = crypto.createDecipheriv("aes-256-gcm", k2, Buffer.from(i2, "base64"));
+      d2.setAuthTag(Buffer.from(t2, "base64"));
+      let p2 = d2.update(e2, "base64");
+      p2 = Buffer.concat([p2, d2.final()]);
+      return p2.toString("utf8");
+    } catch (_) { return null; }
   }
 }
 function mapApiKey(doc) {
@@ -2920,7 +2931,11 @@ function requireAppSignature(mode) {
 
     // Optional hardening when client sends App-Id / signature
     const appId = String(req.get("x-app-id") || "").trim();
-    if (appId && APP_ID && !timingSafeEqualStr(appId, APP_ID)) {
+    if (
+      appId && APP_ID &&
+      !timingSafeEqualStr(appId, APP_ID) &&
+      !(APP_ID_PREV && timingSafeEqualStr(appId, APP_ID_PREV))
+    ) {
       return res.status(404).json({ success: false, message: "Not found" });
     }
 
@@ -2942,7 +2957,10 @@ function requireAppSignature(mode) {
         userName: mode === "auth" || mode === "payment" ? userNameHdr : "",
       });
       const expected = hmacSign(payload);
-      if (!timingSafeEqualStr(sig, expected)) {
+      const expectedPrev = APP_SECRET_PREV
+        ? crypto.createHmac("sha256", APP_SECRET_PREV).update(payload).digest("hex")
+        : "";
+      if (!timingSafeEqualStr(sig, expected) && !(expectedPrev && timingSafeEqualStr(sig, expectedPrev))) {
         console.warn("signature mismatch", pathOnly);
       }
     }
