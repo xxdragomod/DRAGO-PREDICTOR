@@ -2715,8 +2715,16 @@ console.log("✅ MongoDB driver loaded (connect on listen)");
 const oauthStates = new Map(); // state → { exp, ref }
 const STATE_TTL_MS = 10 * 60 * 1000;
 
-function saveState(state, ref) {
-  oauthStates.set(state, { exp: Date.now() + STATE_TTL_MS, ref: ref || null });
+function sanitizeReturnTo(u) {
+  try {
+    const parsed = new URL(String(u || ""));
+    const h = parsed.hostname.toLowerCase();
+    if (h.endsWith(".vercel.app") || h === "localhost" || h === "127.0.0.1") return parsed.origin;
+  } catch (_) {}
+  return null;
+}
+function saveState(state, ref, returnTo) {
+  oauthStates.set(state, { exp: Date.now() + STATE_TTL_MS, ref: ref || null, returnTo: returnTo || null });
   // Cleanup stale
   if (oauthStates.size > 500) {
     const now = Date.now();
@@ -2730,8 +2738,8 @@ function consumeState(state) {
   if (!state) return { ok: false, ref: null };
   const v = oauthStates.get(state);
   oauthStates.delete(state);
-  if (!v || v.exp < Date.now()) return { ok: false, ref: null };
-  return { ok: true, ref: v.ref || null };
+  if (!v || v.exp < Date.now()) return { ok: false, ref: null, returnTo: null };
+  return { ok: true, ref: v.ref || null, returnTo: v.returnTo || null };
 }
 function sanitizeRef(r) {
   return String(r || "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 12) || null;
@@ -3192,7 +3200,7 @@ app.get("/auth/google", (req, res) => {
   }
   const redirectUri = `${publicBase(req)}/auth/google/callback`;
   const state = crypto.randomBytes(24).toString("hex");
-  saveState(state, sanitizeRef(req.query.ref));
+  saveState(state, sanitizeRef(req.query.ref), sanitizeReturnTo(req.query.return_to));
 
   // Cookie backup (same-site backend callback)
   res.cookie("drago_oauth_state", state, {
@@ -3281,7 +3289,7 @@ app.get("/auth/google/callback", async (req, res) => {
     const token = signToken(user);
 
     // Hash fragment — server logs / referrer mein nahi jata
-    res.redirect(`${FRONTEND_URL}/#token=${encodeURIComponent(token)}`);
+    res.redirect(`${st.returnTo || FRONTEND_URL}/#token=${encodeURIComponent(token)}`);
   } catch (err) {
     fail(err.message || "unknown");
   }
