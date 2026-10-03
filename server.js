@@ -1619,9 +1619,8 @@ function findPendingManual(userId, planKey) {
         if (!o || Number(o.user_id) !== uid || String(o.plan) !== plan) return false;
         if (String(o.method || "") !== "UPI_MANUAL") return false;
         const st = String(o.payment_status || "").toUpperCase();
-        if (st === "PENDING_VERIFY") {
-          return Date.parse(o.created_at || 0) >= Date.now() - 30 * 60 * 1000;
-        }
+        // Only reuse an open order that has NOT submitted UTR yet and is within 10 minutes
+        if (o.utr) return false;
         return st === "PENDING" && Date.parse(o.created_at || 0) >= cutoff;
       })
       .sort(
