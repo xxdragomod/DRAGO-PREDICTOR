@@ -59,6 +59,19 @@ const RUPAYEX_API_TOKEN = process.env.RUPAYEX_API_TOKEN || "";
 /** Plan → amount (INR). Client amount trust mat karo.
  * Supports both QR_URL_749 / QR_URL_300 (for ₹749 Weekly) and QR_URL_1498 / QR_URL_900 (for ₹1498 Monthly).
  */
+function resolveValidQrUrl(rawUrl, fallbackUrl) {
+  const u = String(rawUrl || "").trim();
+  if (!u) return fallbackUrl;
+  // Reject non-direct ImgBB page URLs (https://ibb.co/...) or expired ImgBB assets
+  if (
+    /^https?:\/\/(www\.)?ibb\.co\//i.test(u) ||
+    /dc0e2bd33bc2|47c3bf9c834f|spLnbMnw|Ngw5tH5j|ZzZvmHB2|5h7CFYrK|upipe-qr/i.test(u)
+  ) {
+    return fallbackUrl;
+  }
+  return u;
+}
+
 const PLAN_CATALOG = {
   weekly: {
     get name() {
@@ -73,12 +86,15 @@ const PLAN_CATALOG = {
       return Number.isFinite(v) && v >= 1 ? v : 7;
     },
     get qr_url() {
-      return (
+      const raw =
         (adminSettings && adminSettings.weekly_qr_url) ||
         process.env.QR_URL_749 ||
         process.env.QR_URL_300 ||
         process.env.QR_URL_500 ||
-        ""
+        "";
+      return resolveValidQrUrl(
+        raw,
+        "https://dragopredictor.vercel.app/assets/upi/qr-weekly.png"
       );
     },
   },
@@ -95,11 +111,14 @@ const PLAN_CATALOG = {
       return Number.isFinite(v) && v >= 1 ? v : 30;
     },
     get qr_url() {
-      return (
+      const raw =
         (adminSettings && adminSettings.monthly_qr_url) ||
         process.env.QR_URL_1498 ||
         process.env.QR_URL_900 ||
-        ""
+        "";
+      return resolveValidQrUrl(
+        raw,
+        "https://dragopredictor.vercel.app/assets/upi/qr-monthly.png"
       );
     },
   },
@@ -5953,21 +5972,25 @@ app.get("/free-check", async (req, res) => {
 
 /* ── Public App Config (Plans, UPI ID, Auto-Sliding Home Banners) ── */
 app.get("/app-config", (_req, res) => {
+  const weeklyObj = {
+    name: PLAN_CATALOG.weekly.name,
+    amount: PLAN_CATALOG.weekly.amount,
+    days: PLAN_CATALOG.weekly.days,
+    qr_url: PLAN_CATALOG.weekly.qr_url || null,
+  };
+  const monthlyObj = {
+    name: PLAN_CATALOG.monthly.name,
+    amount: PLAN_CATALOG.monthly.amount,
+    days: PLAN_CATALOG.monthly.days,
+    qr_url: PLAN_CATALOG.monthly.qr_url || null,
+  };
   res.json({
     success: true,
     plans: {
-      weekly: {
-        name: PLAN_CATALOG.weekly.name,
-        amount: PLAN_CATALOG.weekly.amount,
-        days: PLAN_CATALOG.weekly.days,
-        qr_url: PLAN_CATALOG.weekly.qr_url || null,
-      },
-      monthly: {
-        name: PLAN_CATALOG.monthly.name,
-        amount: PLAN_CATALOG.monthly.amount,
-        days: PLAN_CATALOG.monthly.days,
-        qr_url: PLAN_CATALOG.monthly.qr_url || null,
-      },
+      weekly: weeklyObj,
+      monthly: monthlyObj,
+      beginners: weeklyObj,
+      profit: monthlyObj,
     },
     upi_id: getActiveUpiId(),
     banners: getActiveBanners(),
