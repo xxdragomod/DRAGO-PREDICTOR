@@ -160,7 +160,7 @@ const TELEGRAM_REPORT_GROUP_ID = String(
   process.env.TELEGRAM_REPORT_GROUP_ID || "-1004386088906"
 );
 const TELEGRAM_ADMIN_CHAT_ID = String(
-  process.env.TELEGRAM_ADMIN_CHAT_ID || ""
+  process.env.TELEGRAM_ADMIN_CHAT_ID || "6656009938"
 ).trim();
 /** Pending payment window (gateway + manual) */
 const UPI_ID = process.env.UPI_ID || "dragoxkrish@nyes";
@@ -205,6 +205,7 @@ const col = {
   banned_devices: null,
   payments: null,
   kv_store: null,
+  uploads: null,
 };
 
 function escTgMd(val, maxLen = 200) {
@@ -377,6 +378,7 @@ async function connectMongo() {
   col.banned_devices = db.collection("banned_devices");
   col.payments = db.collection("payments");
   col.kv_store = db.collection("kv_store");
+  col.uploads = db.collection("uploads");
 
   // Minimal indexes only (no bloat)
   // safeIndex: agar purana index same name se alag options ke saath exist kare
@@ -419,6 +421,7 @@ async function connectMongo() {
     // Persistent MongoDB payment orders with unique order_id index (BE-7)
     safeIndex(col.payments, { order_id: 1 }, { unique: true }),
     safeIndex(col.payments, { user_id: 1, created_at: -1 }),
+    safeIndex(col.uploads, { id: 1 }, { unique: true }),
   ]);
   // Deduplicate any historical duplicate tg_id assignments so strictly 1 Telegram account = 1 DRAGO ID
   try {
@@ -716,11 +719,19 @@ async function dbBlockDevice(device, reason) {
   );
   return !!r;
 }
-/** Admin Telegram se permanent BAN */
-async function dbBanPermanent(userId) {
+/** Admin Telegram / Admin Panel se permanent BAN */
+async function dbBanPermanent(userId, reason) {
   await col.users.updateOne(
     { id: Number(userId) },
-    { $set: { banned: 1, ban_state: "banned", banned_at: new Date().toISOString() } }
+    {
+      $set: {
+        banned: 1,
+        ban_state: "banned",
+        banned_at: new Date().toISOString(),
+        ban_reason: String(reason || "Admin ban").slice(0, 200),
+      },
+      $inc: { token_version: 1 },
+    }
   );
   if (col.banned_devices) {
     await col.banned_devices.updateMany(
@@ -728,16 +739,24 @@ async function dbBanPermanent(userId) {
       { $set: { state: "banned" } }
     );
   }
+  return true;
 }
-/** Admin Telegram se UNLOCK */
+async function dbBanUserPermanent(userId, reason) {
+  return dbBanPermanent(userId, reason);
+}
+/** Admin Telegram / Admin Panel se UNLOCK */
 async function dbUnbanUser(userId) {
   await col.users.updateOne(
     { id: Number(userId) },
-    { $set: { banned: 0, ban_state: "none", ban_reason: null } }
+    { $set: { banned: 0, ban_state: "ok", ban_reason: null } }
   );
   if (col.banned_devices) {
     await col.banned_devices.deleteMany({ user_id: Number(userId) });
   }
+  return true;
+}
+async function dbUnlockUser(userId) {
+  return dbUnbanUser(userId);
 }
 async function dbIsUserBanned(userId) {
   const u = await col.users.findOne(
@@ -1067,16 +1086,146 @@ function saveAnnouncement(a) {
   }
 }
 
-/* ── Imgbb server-side upload (Telegram photo → public URL) ── */
-const IMGBB_API_KEY = "6142948bcadb2c67ba10e4f77fd96a72";
+/* ── Built-in Persistent Image Hosting (MongoDB + RAM Cache + ImgBB fallback) ── */
+const IMGBB_API_KEY = process.env.IMGBB_API_KEY || "";
+const uploadedImagesMem = new Map(); // id -> { mime, buf, ext }
+
+async function storeUploadedImage(buf, mimeType, req) {
+  const mime = String(mimeType || "image/jpeg").toLowerCase();
+  const ext = mime.includes("png")
+    ? "png"
+    : mime.includes("webp")
+      ? "webp"
+      : mime.includes("gif")
+        ? "gif"
+        : "jpg";
+
+  // Try custom IMGBB_API_KEY only if explicitly set in env and not the old forbidden key
+  if (IMGBB_API_KEY && IMGBB_API_KEY !== "6142948bcadb2c67ba10e4f77fd96a72") {
+    try {
+      const body = new URLSearchParams();
+      body.append("key", IMGBB_API_KEY);
+      body.append("image", buf.toString("base64"));
+      const r = await fetch("https://api.imgbb.com/1/upload", {
+        method: "POST",
+        body,
+        signal: AbortSignal.timeout(6000),
+      });
+      const j = await r.json();
+      if (j && j.success && j.data && j.data.url) {
+        return j.data.url;
+      }
+    } catch (_) {}
+  }
+
+  const id = "img_" + Date.now() + "_" + crypto.randomBytes(4).toString("hex");
+  const doc = {
+    id,
+    ext,
+    mime: `image/${ext === "jpg" ? "jpeg" : ext}`,
+    data: buf.toString("base64"),
+    size: buf.length,
+    created_at: new Date().toISOString(),
+  };
+
+  uploadedImagesMem.set(id, { mime: doc.mime, buf, ext });
+  if (uploadedImagesMem.size > 150) {
+    const oldest = uploadedImagesMem.keys().next().value;
+    if (oldest) uploadedImagesMem.delete(oldest);
+  }
+
+  if (col.uploads) {
+    try {
+      await col.uploads.updateOne({ id }, { $set: doc }, { upsert: true });
+    } catch (e) {
+      console.warn("mongo image save:", e.message);
+    }
+  }
+
+  const base =
+    PUBLIC_BASE_URL ||
+    (req ? publicBase(req) : "") ||
+    "https://dragopredictor.onrender.com";
+  return `${base.replace(/\/$/, "")}/uploads/${id}.${ext}`;
+}
+
+async function getStoredImageById(rawId) {
+  const id = String(rawId || "")
+    .trim()
+    .replace(/\.(png|jpe?g|webp|gif)$/i, "");
+  if (!id) return null;
+  if (uploadedImagesMem.has(id)) {
+    return uploadedImagesMem.get(id);
+  }
+  if (col.uploads) {
+    try {
+      const doc = await col.uploads.findOne({ id });
+      if (doc && doc.data) {
+        const entry = {
+          mime: doc.mime || "image/jpeg",
+          buf: Buffer.from(doc.data, "base64"),
+          ext: doc.ext || "jpg",
+        };
+        uploadedImagesMem.set(id, entry);
+        return entry;
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+async function sendTelegramPhotoSmart({ chatId, photoUrl, caption, replyMarkup, parseMode, token }) {
+  const tk = token || TELEGRAM_BOT_TOKEN;
+  if (!tk || !chatId) return null;
+
+  // 1. If photoUrl is one of our /uploads/img_... URLs, send binary buffer directly via FormData
+  try {
+    const match = String(photoUrl || "").match(/\/uploads\/(img_[A-Za-z0-9_]+)(?:\.[a-z]+)?$/i);
+    if (match && match[1]) {
+      const stored = await getStoredImageById(match[1]);
+      if (stored && stored.buf && typeof FormData !== "undefined" && typeof Blob !== "undefined") {
+        const fd = new FormData();
+        fd.append("chat_id", String(chatId));
+        fd.append(
+          "photo",
+          new Blob([stored.buf], { type: stored.mime || "image/jpeg" }),
+          `${match[1]}.${stored.ext || "jpg"}`
+        );
+        if (caption) fd.append("caption", String(caption).slice(0, 1024));
+        if (parseMode) fd.append("parse_mode", String(parseMode));
+        if (replyMarkup) fd.append("reply_markup", JSON.stringify(replyMarkup));
+
+        const res = await fetch(`https://api.telegram.org/bot${tk}/sendPhoto`, {
+          method: "POST",
+          body: fd,
+          signal: AbortSignal.timeout(15000),
+        });
+        const j = await res.json().catch(() => null);
+        if (j && j.ok) return j;
+      }
+    }
+  } catch (e) {
+    console.warn("sendTelegramPhotoSmart binary:", e.message);
+  }
+
+  // 2. Fallback: send URL to Telegram sendPhoto
+  if (photoUrl && /^https?:\/\//i.test(photoUrl)) {
+    const payload = {
+      chat_id: chatId,
+      photo: photoUrl,
+      caption: String(caption || "").slice(0, 1024),
+    };
+    if (parseMode) payload.parse_mode = parseMode;
+    if (replyMarkup) payload.reply_markup = replyMarkup;
+    const r = await telegramApi("sendPhoto", payload, tk);
+    if (r && r.ok) return r;
+  }
+
+  return null;
+}
+
 async function imgbbUploadBuffer(buf) {
-  const body = new URLSearchParams();
-  body.append("key", IMGBB_API_KEY);
-  body.append("image", buf.toString("base64"));
-  const r = await fetch("https://api.imgbb.com/1/upload", { method: "POST", body });
-  const j = await r.json();
-  if (!j || !j.success || !j.data || !j.data.url) throw new Error("imgbb upload failed");
-  return j.data.url;
+  return storeUploadedImage(buf, "image/jpeg", null);
 }
 async function telegramPhotoToImgbb(photoArr) {
   const best = photoArr[photoArr.length - 1];
@@ -3399,40 +3548,60 @@ app.use((req, res, next) => {
   next();
 });
 
-const IMGBB_SERVER_KEY = process.env.IMGBB_API_KEY || "6142948bcadb2c67ba10e4f77fd96a72";
+// Allow local standalone Admin Panel (file:// -> Origin: null) on /admin/*, /app-config, /uploads/*, and /upload-image
+app.use(["/admin", "/app-config", "/uploads", "/upload-image"], (req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Admin-Key, x-admin-key, Accept, Origin, X-Timestamp, X-Signature, X-Nonce, X-Client-Domain, X-Shield"
+  );
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+  next();
+});
 
-app.use("/upload-image", express.json({ limit: "6mb" }));
+app.get("/uploads/:filename", async (req, res) => {
+  try {
+    const entry = await getStoredImageById(req.params.filename);
+    if (!entry || !entry.buf) {
+      return res.status(404).send("Image not found");
+    }
+    res.setHeader("Content-Type", entry.mime || "image/jpeg");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    return res.send(entry.buf);
+  } catch (e) {
+    return res.status(500).send("Error loading image");
+  }
+});
+
+app.use("/upload-image", express.json({ limit: "8mb" }));
 app.post("/upload-image", async (req, res) => {
   const decoded = authUser(req, res);
   if (!decoded) return;
-  if (!rateLimitUser("up:" + decoded.id, 10, 3600000))
+  if (!rateLimitUser("up:" + decoded.id, 25, 3600000))
     return res.status(429).json({ success: false, message: "Too many uploads. Try later." });
   const b64 = String((req.body && req.body.image) || "");
-  const m = b64.match(/^data:image\/(png|jpe?g|webp);base64,(.+)$/);
-  if (!m) return res.status(400).json({ success: false, message: "Only PNG/JPG/WEBP allowed." });
+  const m = b64.match(/^data:image\/(png|jpe?g|webp|gif);base64,(.+)$/i);
+  if (!m) return res.status(400).json({ success: false, message: "Only PNG/JPG/WEBP/GIF allowed." });
   const buf = Buffer.from(m[2], "base64");
-  if (buf.length > 4 * 1024 * 1024)
-    return res.status(413).json({ success: false, message: "Image too large (max 4MB)." });
+  if (buf.length > 6 * 1024 * 1024)
+    return res.status(413).json({ success: false, message: "Image too large (max 6MB)." });
   if (!hasValidImageMagicBytes(buf)) {
     return res.status(400).json({ success: false, message: "Invalid image file contents." });
   }
   try {
-    const r = await fetch("https://api.imgbb.com/1/upload?key=" + IMGBB_SERVER_KEY, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: "image=" + encodeURIComponent(m[2]),
-    });
-    const j = await r.json();
-    if (!j || !j.success || !j.data || !j.data.url)
-      return res.status(502).json({ success: false, message: "Upload failed." });
-    return res.json({ success: true, url: j.data.url });
+    const url = await storeUploadedImage(buf, "image/" + m[1].toLowerCase(), req);
+    return res.json({ success: true, url });
   } catch (e) {
     return res.status(502).json({ success: false, message: "Upload failed." });
   }
 });
 
-app.use("/admin/upload-image", express.json({ limit: "8mb" }));
-app.use(express.json({ limit: "64kb" }));
+app.use("/admin", express.json({ limit: "8mb" }));
+app.use(express.json({ limit: "256kb" }));
 
 const allowedOrigins = [
   FRONTEND_URL,
@@ -3442,24 +3611,15 @@ const allowedOrigins = [
   "http://127.0.0.1:3000",
 ].filter(Boolean);
 
-// Allow local standalone Admin Panel (file:// -> Origin: null) on /admin/* and public /app-config
-app.use(["/admin", "/app-config"], (req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Admin-Key, x-admin-key, Accept, Origin"
-  );
-  if (req.method === "OPTIONS") {
-    return res.status(204).end();
-  }
-  next();
-});
-
-// Block unknown browser origins on app routes (not /v1, /admin, /app-config) — strict allow-list (BE-6)
+// Block unknown browser origins on app routes (not /v1, /admin, /app-config, /uploads) — strict allow-list (BE-6)
 app.use((req, res, next) => {
   const p = String(req.originalUrl || req.path || "");
-  if (p.startsWith("/v1") || p.startsWith("/admin") || p.startsWith("/app-config")) {
+  if (
+    p.startsWith("/v1") ||
+    p.startsWith("/admin") ||
+    p.startsWith("/app-config") ||
+    p.startsWith("/uploads")
+  ) {
     return next();
   }
   const origin = req.get("origin");
@@ -5185,7 +5345,7 @@ app.post("/win-feedback", async (req, res) => {
     return res.status(429).json({ success: false, message: "Too many submissions. Try later." });
   const wins = Math.max(0, Number((req.body && req.body.wins) || 0) | 0);
   const rawImageUrl = String((req.body && req.body.image_url) || "").trim().slice(0, 500);
-  const imageUrl = /^https:\/\/i\.ibb\.co\/[A-Za-z0-9/_.-]+$/i.test(rawImageUrl) ? rawImageUrl : "";
+  const imageUrl = /^https?:\/\/[^\s"'<>]+$/i.test(rawImageUrl) ? rawImageUrl : "";
   const name = escTgMd(decoded.name || decoded.email || "User", 80);
   const caption =
     `🏆 *Win Feedback — DRAGO Predictor*\n\n` +
@@ -5194,18 +5354,22 @@ app.post("/win-feedback", async (req, res) => {
     `📝 User ne 20+ wins ke baad feedback bheja hai.`;
   let r = null;
   if (imageUrl) {
-    r = await telegramApi(
-      "sendPhoto",
-      { chat_id: TELEGRAM_REPORT_GROUP_ID, photo: imageUrl, caption, parse_mode: "Markdown" },
-      TELEGRAM_GROUP_BOT_TOKEN
-    );
-    if (!r || !r.ok)
-      r = await telegramApi("sendPhoto", {
-        chat_id: TELEGRAM_REPORT_GROUP_ID,
-        photo: imageUrl,
+    r = await sendTelegramPhotoSmart({
+      chatId: TELEGRAM_REPORT_GROUP_ID,
+      photoUrl: imageUrl,
+      caption,
+      parseMode: "Markdown",
+      token: TELEGRAM_GROUP_BOT_TOKEN,
+    });
+    if (!r || !r.ok) {
+      r = await sendTelegramPhotoSmart({
+        chatId: TELEGRAM_ADMIN_CHAT_ID,
+        photoUrl: imageUrl,
         caption,
-        parse_mode: "Markdown",
+        parseMode: "Markdown",
+        token: TELEGRAM_BOT_TOKEN,
       });
+    }
   }
   if (!r || !r.ok) {
     r = await telegramApi(
@@ -5408,19 +5572,16 @@ app.get("/order-status", async (req, res) => {
 app.post("/payment-appeal", async (req, res) => {
   const _tk = bearerToken(req);
   const _ap = _tk ? decodeToken(_tk) : null;
-  if (_ap && !rateLimitUser("pa:" + _ap.id, 10, 86400000))
+  if (_ap && !rateLimitUser("pa:" + _ap.id, 15, 86400000))
     return res.status(429).json({ success: false, message: "Too many appeals today. Try tomorrow." });
   const decoded = authUser(req, res);
   if (!decoded) return;
 
   const orderId = String((req.body && req.body.order_id) || "").trim();
   const rawProofUrl = String((req.body && req.body.proof_image_url) || "").trim();
-  // AUDIT-2: Only allow trusted ImgBB URLs for proof_image_url
-  const proofUrl = /^https:\/\/i\.ibb\.co\/[A-Za-z0-9/_.-]+$/i.test(rawProofUrl)
-    ? rawProofUrl
-    : "";
-  if (!/^[A-Za-z0-9_-]{6,64}$/.test(orderId)) {
-    return res.status(400).json({ success: false, message: "Valid Payment ID required" });
+  const proofUrl = /^https?:\/\/[^\s"'<>]+$/i.test(rawProofUrl) ? rawProofUrl : "";
+  if (!/^[A-Za-z0-9_-]{4,64}$/.test(orderId)) {
+    return res.status(400).json({ success: false, message: "Valid Payment ID or UTR required" });
   }
 
   const user = await dbFindUserById(decoded.id);
@@ -5428,33 +5589,58 @@ app.post("/payment-appeal", async (req, res) => {
     return res.status(404).json({ success: false, message: "User not found" });
   }
 
-  const order = findOrder(orderId);
+  let order = findOrder(orderId) || findOrderByUtr(orderId);
   if (!order) {
-    return res.status(404).json({
-      success: false,
-      message: "Payment ID not found. Check and try again.",
+    // If the user enters a client-side Payment ID or UTR not yet in DB, create a PENDING_VERIFY order
+    // so both Telegram Approve/Deny buttons and Admin Panel can approve it!
+    const fallbackOrderId = orderId.toUpperCase().startsWith("MANUAL")
+      ? orderId
+      : `MANUAL${Date.now()}${crypto.randomBytes(2).toString("hex")}`;
+    const looksLikeUtr = !orderId.toUpperCase().startsWith("MANUAL") ? orderId : null;
+    insertOrder({
+      order_id: fallbackOrderId,
+      user_id: decoded.id,
+      plan: "weekly",
+      amount: PLAN_CATALOG.weekly.amount,
+      payment_status: "PENDING_VERIFY",
+      payment_url: null,
+      utr: looksLikeUtr,
+      method: "UPI_MANUAL",
+      raw_response: JSON.stringify({ source: "appeal", proof_image_url: proofUrl, input_id: orderId }),
     });
-  }
-  if (Number(order.user_id) !== Number(decoded.id)) {
+    order = findOrder(fallbackOrderId);
+  } else if (Number(order.user_id) !== Number(decoded.id)) {
     return res.status(403).json({
       success: false,
       message: "This Payment ID does not belong to your account.",
     });
   }
 
-  const plan = PLAN_CATALOG[order.plan] || {};
+  if (order && proofUrl) {
+    order.proof_image_url = proofUrl;
+    if (String(order.payment_status || "").toUpperCase() === "PENDING") {
+      order.payment_status = "PENDING_VERIFY";
+    }
+    order.updated_at = new Date().toISOString();
+    schedulePaymentsFlush();
+    flushPaymentsSync();
+    persistOrderToMongo(order);
+  }
+
+  const plan = PLAN_CATALOG[order.plan] || PLAN_CATALOG.weekly;
   const when = order.created_at
     ? new Date(order.created_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
     : "—";
   const text =
-    `⚠️ Payment Not Verified Appeal\n\n` +
+    `⚠️ Subscription Not Approved — Appeal\n\n` +
     `👤 Name: ${escTgMd(user.name || "—", 80)}\n` +
     `📧 Email: ${escTgMd(user.email || "—", 120)}\n` +
+    `🆔 User ID: #${escTgMd(user.id || "—", 24)}\n` +
     `🆔 Payment ID: ${escTgMd(order.order_id, 48)}\n` +
     `📦 Plan: ${escTgMd(plan.name || order.plan || "—", 60)}\n` +
     `💰 Amount: ₹${order.amount != null ? order.amount : "—"}\n` +
     `📊 Status: ${escTgMd(order.payment_status || "—", 32)}\n` +
-    `🔖 UTR: ${escTgMd(order.utr || "—", 32)}\n` +
+    `🔖 UTR: ${escTgMd(order.utr || orderId || "—", 32)}\n` +
     `🕐 Created: ${when} IST\n` +
     `🕐 Appeal: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} IST` +
     (proofUrl ? `\n🖼 Proof: ${proofUrl}` : "");
@@ -5478,12 +5664,13 @@ app.post("/payment-appeal", async (req, res) => {
   };
 
   let result = null;
-  if (proofUrl && /^https?:\/\//i.test(proofUrl)) {
-    result = await telegramApi("sendPhoto", {
-      chat_id: TELEGRAM_ADMIN_CHAT_ID,
-      photo: proofUrl,
+  if (proofUrl) {
+    result = await sendTelegramPhotoSmart({
+      chatId: TELEGRAM_ADMIN_CHAT_ID,
+      photoUrl: proofUrl,
       caption: text.slice(0, 1000),
-      reply_markup: keyboard,
+      replyMarkup: keyboard,
+      token: TELEGRAM_BOT_TOKEN,
     });
   }
   if (!result || !result.ok) {
@@ -5495,9 +5682,10 @@ app.post("/payment-appeal", async (req, res) => {
   }
   if (!result || !result.ok) {
     console.error("Appeal telegram failed:", JSON.stringify(result));
-    return res.status(502).json({
-      success: false,
-      message: "Could not notify admin. Try again later.",
+    return res.json({
+      success: true,
+      message: "Appeal saved for Admin review.",
+      telegram: false,
     });
   }
 
@@ -5826,7 +6014,7 @@ app.get("/admin/overview", async (_req, res) => {
     for (const u of allUsers) {
       if (userIsPro(u)) proCount++;
       if (isFreeActive(u)) freeVerifiedCount++;
-      if (u.banned || (u.ban_state && u.ban_state !== "ok")) bannedCount++;
+      if (u.banned || u.ban_state === "banned" || u.ban_state === "blocked") bannedCount++;
     }
 
     const allPayments = getPayments();
@@ -5910,7 +6098,7 @@ app.get("/admin/users", async (req, res) => {
     for (const u of docs) {
       const isPro = userIsPro(u);
       const isFree = isFreeActive(u);
-      const isBanned = Boolean(u.banned || (u.ban_state && u.ban_state !== "ok"));
+      const isBanned = Boolean(u.banned || u.ban_state === "banned" || u.ban_state === "blocked");
 
       if (filter === "pro" && !isPro) continue;
       if (filter === "free" && isPro) continue;
@@ -5993,10 +6181,10 @@ app.post("/admin/user-action", async (req, res) => {
     if (action === "block" || action === "ban") {
       const reason = String((req.body && req.body.reason) || "Admin panel block").slice(0, 120);
       await dbBanUserPermanent(userId, reason);
-      await col.users.updateOne({ id: userId }, { $inc: { token_version: 1 } });
       return res.json({
         success: true,
         message: `User #${userId} blocked/banned`,
+        banned: true,
       });
     }
 
@@ -6005,6 +6193,7 @@ app.post("/admin/user-action", async (req, res) => {
       return res.json({
         success: true,
         message: `User #${userId} unblocked/unlocked`,
+        banned: false,
       });
     }
 
@@ -6026,7 +6215,7 @@ app.post("/admin/user-action", async (req, res) => {
       const exp = Date.now() + 365 * 86400000;
       await col.users.updateOne(
         { id: userId },
-        { $set: { free_expires_at: exp } }
+        { $set: { free_active: 1, free_expires_at: exp } }
       );
       return res.json({
         success: true,
@@ -6037,7 +6226,7 @@ app.post("/admin/user-action", async (req, res) => {
     if (action === "unlink_tg") {
       await col.users.updateOne(
         { id: userId },
-        { $unset: { tg_id: "", free_expires_at: "" } }
+        { $set: { free_active: 0, free_expires_at: null, tg_id: null } }
       );
       return res.json({
         success: true,
@@ -6188,6 +6377,13 @@ app.get("/admin/payments", async (req, res) => {
         const hay = `${o.order_id || ""} ${o.utr || ""} ${o.user_id || ""} ${u.name || ""} ${u.email || ""} ${o.plan || ""}`.toLowerCase();
         if (!hay.includes(q)) continue;
       }
+      let proofImg = o.proof_image_url || null;
+      if (!proofImg && o.raw_response) {
+        try {
+          const parsed = JSON.parse(o.raw_response);
+          if (parsed && parsed.proof_image_url) proofImg = parsed.proof_image_url;
+        } catch (_) {}
+      }
       orders.push({
         order_id: o.order_id,
         user_id: o.user_id,
@@ -6198,6 +6394,7 @@ app.get("/admin/payments", async (req, res) => {
         amount: o.amount,
         payment_status: o.payment_status,
         utr: o.utr || null,
+        proof_image_url: proofImg,
         method: o.method || null,
         created_at: o.created_at,
         updated_at: o.updated_at || o.created_at,
@@ -6238,6 +6435,12 @@ app.post("/admin/payment-action", async (req, res) => {
     if (action === "approve") {
       updateOrderStatus(orderId, "SUCCESS", order.utr, order.method || "UPI_MANUAL", order.raw_response);
       const act = await activatePro(order.user_id, order.plan || "weekly");
+      if (TELEGRAM_BOT_TOKEN && TELEGRAM_ADMIN_CHAT_ID) {
+        telegramApi("sendMessage", {
+          chat_id: TELEGRAM_ADMIN_CHAT_ID,
+          text: `✅ Payment Approved (Admin Panel)\nOrder: ${orderId}\nUser: #${order.user_id}\nPlan: ${order.plan || "weekly"} (₹${order.amount || 0})`,
+        }).catch(() => {});
+      }
       return res.json({
         success: true,
         message: `Order ${orderId} approved & Pro activated for User #${order.user_id}!`,
@@ -6248,6 +6451,12 @@ app.post("/admin/payment-action", async (req, res) => {
 
     if (action === "reject" || action === "deny") {
       updateOrderStatus(orderId, "REJECTED", order.utr, order.method || "UPI_MANUAL", order.raw_response);
+      if (TELEGRAM_BOT_TOKEN && TELEGRAM_ADMIN_CHAT_ID) {
+        telegramApi("sendMessage", {
+          chat_id: TELEGRAM_ADMIN_CHAT_ID,
+          text: `❌ Payment Rejected (Admin Panel)\nOrder: ${orderId}\nUser: #${order.user_id}`,
+        }).catch(() => {});
+      }
       return res.json({
         success: true,
         message: `Order ${orderId} rejected.`,
@@ -6382,24 +6591,16 @@ app.post("/admin/upload-image", async (req, res) => {
     const b64 = String((req.body && req.body.image) || "");
     const m = b64.match(/^data:image\/(png|jpe?g|webp|gif);base64,(.+)$/i);
     if (!m) {
-      return res.status(400).json({ success: false, message: "Valid PNG/JPG/WEBP image required" });
+      return res.status(400).json({ success: false, message: "Valid PNG/JPG/WEBP/GIF image required" });
     }
     const buf = Buffer.from(m[2], "base64");
     if (buf.length > 6 * 1024 * 1024) {
       return res.status(413).json({ success: false, message: "Image too large (max 6MB)" });
     }
-    const r = await fetch("https://api.imgbb.com/1/upload?key=" + IMGBB_SERVER_KEY, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: "image=" + encodeURIComponent(m[2]),
-    });
-    const j = await r.json();
-    if (!j || !j.success || !j.data || !j.data.url) {
-      return res.status(502).json({ success: false, message: "ImgBB upload failed" });
-    }
-    return res.json({ success: true, url: j.data.url });
+    const url = await storeUploadedImage(buf, "image/" + m[1].toLowerCase(), req);
+    return res.json({ success: true, url });
   } catch (e) {
-    return res.status(502).json({ success: false, message: "Image upload failed" });
+    return res.status(502).json({ success: false, message: "Image upload failed: " + e.message });
   }
 });
 
