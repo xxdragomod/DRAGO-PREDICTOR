@@ -61,11 +61,20 @@ const RUPAYEX_API_TOKEN = process.env.RUPAYEX_API_TOKEN || "";
  */
 const PLAN_CATALOG = {
   weekly: {
-    name: "PRO VIP WEEKLY",
-    amount: 749,
-    days: 7,
+    get name() {
+      return (adminSettings && adminSettings.weekly_name) || "PRO VIP WEEKLY";
+    },
+    get amount() {
+      const v = Number(adminSettings && adminSettings.weekly_amount);
+      return Number.isFinite(v) && v >= 1 ? v : 749;
+    },
+    get days() {
+      const v = Number(adminSettings && adminSettings.weekly_days);
+      return Number.isFinite(v) && v >= 1 ? v : 7;
+    },
     get qr_url() {
       return (
+        (adminSettings && adminSettings.weekly_qr_url) ||
         process.env.QR_URL_749 ||
         process.env.QR_URL_300 ||
         process.env.QR_URL_500 ||
@@ -74,45 +83,66 @@ const PLAN_CATALOG = {
     },
   },
   monthly: {
-    name: "PRO VIP MONTHLY",
-    amount: 1498,
-    days: 30,
+    get name() {
+      return (adminSettings && adminSettings.monthly_name) || "PRO VIP MONTHLY";
+    },
+    get amount() {
+      const v = Number(adminSettings && adminSettings.monthly_amount);
+      return Number.isFinite(v) && v >= 1 ? v : 1498;
+    },
+    get days() {
+      const v = Number(adminSettings && adminSettings.monthly_days);
+      return Number.isFinite(v) && v >= 1 ? v : 30;
+    },
     get qr_url() {
-      return process.env.QR_URL_1498 || process.env.QR_URL_900 || "";
+      return (
+        (adminSettings && adminSettings.monthly_qr_url) ||
+        process.env.QR_URL_1498 ||
+        process.env.QR_URL_900 ||
+        ""
+      );
     },
   },
   test: {
-    name: "PRO VIP WEEKLY",
-    amount: 749,
-    days: 7,
+    get name() {
+      return PLAN_CATALOG.weekly.name;
+    },
+    get amount() {
+      return PLAN_CATALOG.weekly.amount;
+    },
+    get days() {
+      return PLAN_CATALOG.weekly.days;
+    },
     get qr_url() {
-      return (
-        process.env.QR_URL_749 ||
-        process.env.QR_URL_300 ||
-        process.env.QR_URL_500 ||
-        ""
-      );
+      return PLAN_CATALOG.weekly.qr_url;
     },
   },
   beginners: {
-    name: "PRO VIP WEEKLY",
-    amount: 749,
-    days: 7,
+    get name() {
+      return PLAN_CATALOG.weekly.name;
+    },
+    get amount() {
+      return PLAN_CATALOG.weekly.amount;
+    },
+    get days() {
+      return PLAN_CATALOG.weekly.days;
+    },
     get qr_url() {
-      return (
-        process.env.QR_URL_749 ||
-        process.env.QR_URL_500 ||
-        process.env.QR_URL_300 ||
-        ""
-      );
+      return PLAN_CATALOG.weekly.qr_url;
     },
   },
   profit: {
-    name: "PRO VIP MONTHLY",
-    amount: 1498,
-    days: 30,
+    get name() {
+      return PLAN_CATALOG.monthly.name;
+    },
+    get amount() {
+      return PLAN_CATALOG.monthly.amount;
+    },
+    get days() {
+      return PLAN_CATALOG.monthly.days;
+    },
     get qr_url() {
-      return process.env.QR_URL_1498 || process.env.QR_URL_900 || "";
+      return PLAN_CATALOG.monthly.qr_url;
     },
   },
 };
@@ -976,8 +1006,38 @@ const DEFAULT_ADMIN_SETTINGS = {
   free_pred_limit: 3,
   free_api_history_limit: 10,
   free_nexus_limit: 3,
+  weekly_name: "PRO VIP WEEKLY",
+  weekly_amount: 749,
+  weekly_days: 7,
+  weekly_qr_url: "",
+  monthly_name: "PRO VIP MONTHLY",
+  monthly_amount: 1498,
+  monthly_days: 30,
+  monthly_qr_url: "",
+  upi_id: "",
+  banners: [
+    {
+      id: "default_rx1",
+      title: "DRAGO Predictor RX1 Model",
+      image_url: "/assets/images/banners/rx1-model-feature.webp",
+      link_url: "/prediction/",
+      active: true,
+    },
+  ],
 };
 let adminSettings = { ...DEFAULT_ADMIN_SETTINGS };
+
+function getActiveUpiId() {
+  return (adminSettings && adminSettings.upi_id && String(adminSettings.upi_id).trim()) || UPI_ID;
+}
+
+function getActiveBanners() {
+  const list = Array.isArray(adminSettings && adminSettings.banners)
+    ? adminSettings.banners.filter((b) => b && b.image_url && b.active !== false)
+    : [];
+  if (list.length > 0) return list;
+  return DEFAULT_ADMIN_SETTINGS.banners;
+}
 
 /* ── Announcement broadcast (new game / feature popup) ── */
 const ANNOUNCE_PATH = path.join(__dirname, "announcement.json");
@@ -3371,7 +3431,8 @@ app.post("/upload-image", async (req, res) => {
   }
 });
 
-app.use(express.json({ limit: "32kb" }));
+app.use("/admin/upload-image", express.json({ limit: "8mb" }));
+app.use(express.json({ limit: "64kb" }));
 
 const allowedOrigins = [
   FRONTEND_URL,
@@ -3381,10 +3442,26 @@ const allowedOrigins = [
   "http://127.0.0.1:3000",
 ].filter(Boolean);
 
-// Block unknown browser origins on app routes (not /v1) — strict allow-list (BE-6)
+// Allow local standalone Admin Panel (file:// -> Origin: null) on /admin/* and public /app-config
+app.use(["/admin", "/app-config"], (req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Admin-Key, x-admin-key, Accept, Origin"
+  );
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+  next();
+});
+
+// Block unknown browser origins on app routes (not /v1, /admin, /app-config) — strict allow-list (BE-6)
 app.use((req, res, next) => {
-  const isV1 = req.path.startsWith("/v1") || String(req.originalUrl || "").startsWith("/v1");
-  if (isV1) return next();
+  const p = String(req.originalUrl || req.path || "");
+  if (p.startsWith("/v1") || p.startsWith("/admin") || p.startsWith("/app-config")) {
+    return next();
+  }
   const origin = req.get("origin");
   if (!origin) return next();
   try {
@@ -3857,7 +3934,8 @@ app.get("/payment-config", (req, res) => {
     amount: plan.amount,
     days: plan.days,
     qr_url: plan.qr_url || null,
-    ttl_minutes: 10, upi_id: UPI_ID,
+    ttl_minutes: 10,
+    upi_id: getActiveUpiId(),
   });
 });
 
@@ -4454,7 +4532,7 @@ app.post("/manual-payment/start", (req, res) => {
         created_at: existing.created_at,
         expires_at: new Date(expiresAtMs).toISOString(),
         expires_in_sec: expiresInSec,
-        upi_id: UPI_ID,
+        upi_id: getActiveUpiId(),
         payment_status: existing.payment_status || "PENDING",
         utr: existing.utr || null,
         reused: true,
@@ -4497,7 +4575,7 @@ app.post("/manual-payment/start", (req, res) => {
       created_at: new Date(nowMs).toISOString(),
       expires_at: new Date(expiresAtMs).toISOString(),
       expires_in_sec: Math.floor(PAYMENT_TTL_MS / 1000),
-      upi_id: UPI_ID,
+      upi_id: getActiveUpiId(),
       payment_status: "PENDING",
     });
   } catch (err) {
@@ -5683,6 +5761,645 @@ app.get("/free-check", async (req, res) => {
     res.json({ success: true, free_active: u && isFreeActive(u) ? 1 : 0 });
   } catch (e) {
     res.json({ success: true, free_active: 0 });
+  }
+});
+
+/* ── Public App Config (Plans, UPI ID, Auto-Sliding Home Banners) ── */
+app.get("/app-config", (_req, res) => {
+  res.json({
+    success: true,
+    plans: {
+      weekly: {
+        name: PLAN_CATALOG.weekly.name,
+        amount: PLAN_CATALOG.weekly.amount,
+        days: PLAN_CATALOG.weekly.days,
+        qr_url: PLAN_CATALOG.weekly.qr_url || null,
+      },
+      monthly: {
+        name: PLAN_CATALOG.monthly.name,
+        amount: PLAN_CATALOG.monthly.amount,
+        days: PLAN_CATALOG.monthly.days,
+        qr_url: PLAN_CATALOG.monthly.qr_url || null,
+      },
+    },
+    upi_id: getActiveUpiId(),
+    banners: getActiveBanners(),
+    free_limits: {
+      pred: freePredLimit(),
+      api_history: freeApiHistoryLimit(),
+      nexus: freeNexusLimit(),
+    },
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ADMIN PANEL API (/admin/*) — Protected by X-Admin-Key
+   Works from standalone local index.html on mobile (Origin: null supported)
+   ═══════════════════════════════════════════════════════════════════════════ */
+const ADMIN_PANEL_KEY = (process.env.ADMIN_PANEL_KEY || "DRAGO-ADMIN-2026").trim();
+
+function requireAdminKey(req, res, next) {
+  const ip = String(req.ip || req.socket?.remoteAddress || "unknown");
+  if (!rateLimitUser("adm_try:" + ip, 60, 300000)) {
+    return res.status(429).json({ success: false, message: "Too many admin attempts. Wait 5 min." });
+  }
+  let key = String(req.get("x-admin-key") || "").trim();
+  if (!key) {
+    const auth = String(req.get("authorization") || "").trim();
+    if (auth.toLowerCase().startsWith("bearer ")) key = auth.slice(7).trim();
+  }
+  if (!key || !timingSafeEqualStr(key, ADMIN_PANEL_KEY)) {
+    return res.status(401).json({ success: false, message: "Invalid Admin Key" });
+  }
+  next();
+}
+
+app.use("/admin", requireAdminKey);
+
+app.get("/admin/overview", async (_req, res) => {
+  try {
+    expireStaleOrders();
+    const allUsers = col.users ? await col.users.find({}).toArray() : [];
+    let proCount = 0;
+    let freeVerifiedCount = 0;
+    let bannedCount = 0;
+    for (const u of allUsers) {
+      if (userIsPro(u)) proCount++;
+      if (isFreeActive(u)) freeVerifiedCount++;
+      if (u.banned || (u.ban_state && u.ban_state !== "ok")) bannedCount++;
+    }
+
+    const allPayments = getPayments();
+    let approvedPayments = 0;
+    let pendingVerifyPayments = 0;
+    let pendingPayments = 0;
+    let rejectedPayments = 0;
+    let expiredPayments = 0;
+    let totalRevenue = 0;
+
+    for (const o of allPayments) {
+      if (!o) continue;
+      const st = String(o.payment_status || "").toUpperCase();
+      if (st === "SUCCESS" || st === "APPROVED") {
+        approvedPayments++;
+        totalRevenue += Number(o.amount) || 0;
+      } else if (st === "PENDING_VERIFY") {
+        pendingVerifyPayments++;
+      } else if (st === "PENDING") {
+        pendingPayments++;
+      } else if (st === "REJECTED" || st === "FAILED" || st === "DENIED") {
+        rejectedPayments++;
+      } else if (st === "EXPIRED") {
+        expiredPayments++;
+      }
+    }
+
+    const games = col.games ? await dbListGames() : [];
+    const banners = Array.isArray(adminSettings.banners) && adminSettings.banners.length
+      ? adminSettings.banners
+      : DEFAULT_ADMIN_SETTINGS.banners;
+
+    res.json({
+      success: true,
+      stats: {
+        total_users: allUsers.length,
+        pro_users: proCount,
+        free_verified_users: freeVerifiedCount,
+        banned_users: bannedCount,
+        total_payments: allPayments.length,
+        approved_payments: approvedPayments,
+        pending_verify_payments: pendingVerifyPayments,
+        pending_payments: pendingPayments,
+        rejected_payments: rejectedPayments,
+        expired_payments: expiredPayments,
+        total_revenue: totalRevenue,
+        total_games: games.length,
+        total_banners: banners.length,
+      },
+      settings: {
+        ...adminSettings,
+        weekly_amount: PLAN_CATALOG.weekly.amount,
+        weekly_days: PLAN_CATALOG.weekly.days,
+        weekly_name: PLAN_CATALOG.weekly.name,
+        weekly_qr_url: PLAN_CATALOG.weekly.qr_url,
+        monthly_amount: PLAN_CATALOG.monthly.amount,
+        monthly_days: PLAN_CATALOG.monthly.days,
+        monthly_name: PLAN_CATALOG.monthly.name,
+        monthly_qr_url: PLAN_CATALOG.monthly.qr_url,
+        upi_id: getActiveUpiId(),
+      },
+      banners,
+      games,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.get("/admin/users", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim().toLowerCase();
+    const filter = String(req.query.filter || "all").trim().toLowerCase();
+    const limit = Math.max(1, Math.min(Number(req.query.limit) || 300, 1000));
+
+    const docs = col.users
+      ? await col.users.find({}).sort({ id: -1 }).toArray()
+      : [];
+
+    const mapped = [];
+    for (const u of docs) {
+      const isPro = userIsPro(u);
+      const isFree = isFreeActive(u);
+      const isBanned = Boolean(u.banned || (u.ban_state && u.ban_state !== "ok"));
+
+      if (filter === "pro" && !isPro) continue;
+      if (filter === "free" && isPro) continue;
+      if (filter === "verified" && !isFree) continue;
+      if (filter === "banned" && !isBanned) continue;
+
+      if (q) {
+        const hay = `${u.id} #${u.id} ${u.name || ""} ${u.email || ""} ${u.tg_id || ""} ${u.pro_plan || ""}`.toLowerCase();
+        if (!hay.includes(q)) continue;
+      }
+
+      mapped.push({
+        id: u.id,
+        name: u.name || "User",
+        email: u.email || "",
+        picture: u.picture || "",
+        created_at: u.created_at || null,
+        is_pro: isPro,
+        pro_plan: isPro ? u.pro_plan || "weekly" : null,
+        pro_expires_at: isPro ? u.pro_expires_at || null : null,
+        free_active: isFree,
+        tg_id: u.tg_id || null,
+        free_pred_used: Number(u.free_pred_used) || 0,
+        free_pred_limit: freePredLimit(),
+        free_api_used: Number(u.free_api_used) || 0,
+        free_api_limit: freeApiHistoryLimit(),
+        free_nexus_used: Number(u.free_nexus_used) || 0,
+        free_nexus_limit: freeNexusLimit(),
+        banned: isBanned,
+        ban_state: u.ban_state || (u.banned ? "banned" : "ok"),
+        ban_reason: u.ban_reason || "",
+        banned_device: u.banned_device || "",
+      });
+      if (mapped.length >= limit) break;
+    }
+
+    res.json({ success: true, total: docs.length, count: mapped.length, users: mapped });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.post("/admin/user-action", async (req, res) => {
+  try {
+    const userId = Number(req.body && req.body.user_id);
+    const action = String((req.body && req.body.action) || "").trim().toLowerCase();
+    if (!userId || !action) {
+      return res.status(400).json({ success: false, message: "user_id and action required" });
+    }
+    const u = await col.users.findOne({ id: userId });
+    if (!u) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    if (action === "activate_pro") {
+      const rawPlan = String((req.body && req.body.plan) || "weekly").trim().toLowerCase();
+      const planKey = rawPlan === "monthly" || rawPlan === "profit" ? "monthly" : "weekly";
+      const customDays = Number(req.body && req.body.days);
+      const days = Number.isFinite(customDays) && customDays >= 1
+        ? customDays
+        : PLAN_CATALOG[planKey].days;
+      const expires = new Date(Date.now() + days * 86400000).toISOString();
+      await dbSetUserPro(userId, 1, planKey, expires);
+      return res.json({
+        success: true,
+        message: `User #${userId} activated on ${planKey.toUpperCase()} (${days} days)`,
+        pro_plan: planKey,
+        pro_expires_at: expires,
+      });
+    }
+
+    if (action === "revoke_pro") {
+      await dbSetUserPro(userId, 0, null, null);
+      return res.json({
+        success: true,
+        message: `User #${userId} moved to Free plan`,
+      });
+    }
+
+    if (action === "block" || action === "ban") {
+      const reason = String((req.body && req.body.reason) || "Admin panel block").slice(0, 120);
+      await dbBanUserPermanent(userId, reason);
+      await col.users.updateOne({ id: userId }, { $inc: { token_version: 1 } });
+      return res.json({
+        success: true,
+        message: `User #${userId} blocked/banned`,
+      });
+    }
+
+    if (action === "unblock" || action === "unban") {
+      await dbUnlockUser(userId);
+      return res.json({
+        success: true,
+        message: `User #${userId} unblocked/unlocked`,
+      });
+    }
+
+    if (action === "reset_quota") {
+      await col.users.updateOne(
+        { id: userId },
+        { $set: { free_pred_used: 0, free_api_used: 0, free_nexus_used: 0 } }
+      );
+      if (col.api_usage) {
+        await col.api_usage.deleteMany({ user_id: userId });
+      }
+      return res.json({
+        success: true,
+        message: `Free quotas reset to 0 for User #${userId}`,
+      });
+    }
+
+    if (action === "verify_free") {
+      const exp = Date.now() + 365 * 86400000;
+      await col.users.updateOne(
+        { id: userId },
+        { $set: { free_expires_at: exp } }
+      );
+      return res.json({
+        success: true,
+        message: `Free plan manually verified for User #${userId}`,
+      });
+    }
+
+    if (action === "unlink_tg") {
+      await col.users.updateOne(
+        { id: userId },
+        { $unset: { tg_id: "", free_expires_at: "" } }
+      );
+      return res.json({
+        success: true,
+        message: `Telegram unlinked for User #${userId}`,
+      });
+    }
+
+    return res.status(400).json({ success: false, message: "Unknown action" });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.post("/admin/settings", (req, res) => {
+  try {
+    const b = req.body || {};
+    if (b.weekly_amount != null) {
+      const n = Number(b.weekly_amount);
+      if (Number.isFinite(n) && n >= 1 && n <= 100000) adminSettings.weekly_amount = Math.round(n);
+    }
+    if (b.weekly_days != null) {
+      const n = Number(b.weekly_days);
+      if (Number.isFinite(n) && n >= 1 && n <= 3650) adminSettings.weekly_days = Math.round(n);
+    }
+    if (typeof b.weekly_name === "string" && b.weekly_name.trim()) {
+      adminSettings.weekly_name = b.weekly_name.trim().slice(0, 50);
+    }
+    if (typeof b.weekly_qr_url === "string") {
+      adminSettings.weekly_qr_url = b.weekly_qr_url.trim();
+    }
+
+    if (b.monthly_amount != null) {
+      const n = Number(b.monthly_amount);
+      if (Number.isFinite(n) && n >= 1 && n <= 100000) adminSettings.monthly_amount = Math.round(n);
+    }
+    if (b.monthly_days != null) {
+      const n = Number(b.monthly_days);
+      if (Number.isFinite(n) && n >= 1 && n <= 3650) adminSettings.monthly_days = Math.round(n);
+    }
+    if (typeof b.monthly_name === "string" && b.monthly_name.trim()) {
+      adminSettings.monthly_name = b.monthly_name.trim().slice(0, 50);
+    }
+    if (typeof b.monthly_qr_url === "string") {
+      adminSettings.monthly_qr_url = b.monthly_qr_url.trim();
+    }
+
+    if (typeof b.upi_id === "string") {
+      adminSettings.upi_id = b.upi_id.trim().slice(0, 100);
+    }
+
+    if (b.free_pred_limit != null) {
+      const n = Number(b.free_pred_limit);
+      if (Number.isFinite(n) && n >= 0 && n <= 1000) adminSettings.free_pred_limit = Math.round(n);
+    }
+    if (b.free_api_history_limit != null) {
+      const n = Number(b.free_api_history_limit);
+      if (Number.isFinite(n) && n >= 0 && n <= 10000) adminSettings.free_api_history_limit = Math.round(n);
+    }
+    if (b.free_nexus_limit != null) {
+      const n = Number(b.free_nexus_limit);
+      if (Number.isFinite(n) && n >= 0 && n <= 1000) adminSettings.free_nexus_limit = Math.round(n);
+    }
+
+    if (typeof b.google_auth_enabled === "boolean") adminSettings.google_auth_enabled = b.google_auth_enabled;
+    if (typeof b.auto_payment_enabled === "boolean") adminSettings.auto_payment_enabled = b.auto_payment_enabled;
+    if (typeof b.manual_payment_enabled === "boolean") adminSettings.manual_payment_enabled = b.manual_payment_enabled;
+    if (typeof b.guard_enabled === "boolean") adminSettings.guard_enabled = b.guard_enabled;
+
+    saveAdminSettings();
+    res.json({
+      success: true,
+      message: "Settings & Plan prices saved!",
+      settings: adminSettings,
+      plans: {
+        weekly: {
+          name: PLAN_CATALOG.weekly.name,
+          amount: PLAN_CATALOG.weekly.amount,
+          days: PLAN_CATALOG.weekly.days,
+          qr_url: PLAN_CATALOG.weekly.qr_url,
+        },
+        monthly: {
+          name: PLAN_CATALOG.monthly.name,
+          amount: PLAN_CATALOG.monthly.amount,
+          days: PLAN_CATALOG.monthly.days,
+          qr_url: PLAN_CATALOG.monthly.qr_url,
+        },
+      },
+      upi_id: getActiveUpiId(),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.get("/admin/payments", async (req, res) => {
+  try {
+    expireStaleOrders();
+    const statusFilter = String(req.query.status || "ALL").trim().toUpperCase();
+    const q = String(req.query.q || "").trim().toLowerCase();
+    const limit = Math.max(1, Math.min(Number(req.query.limit) || 300, 1000));
+
+    const userMap = new Map();
+    if (col.users) {
+      const uDocs = await col.users
+        .find({}, { projection: { id: 1, name: 1, email: 1 } })
+        .toArray();
+      for (const u of uDocs) userMap.set(Number(u.id), u);
+    }
+
+    const all = getPayments()
+      .filter(Boolean)
+      .slice()
+      .sort((a, b) => Date.parse(b.created_at || 0) - Date.parse(a.created_at || 0));
+
+    let approved = 0;
+    let pendingVerify = 0;
+    let pending = 0;
+    let rejected = 0;
+    let expired = 0;
+    let approvedRevenue = 0;
+
+    for (const o of all) {
+      const st = String(o.payment_status || "").toUpperCase();
+      if (st === "SUCCESS" || st === "APPROVED") {
+        approved++;
+        approvedRevenue += Number(o.amount) || 0;
+      } else if (st === "PENDING_VERIFY") {
+        pendingVerify++;
+      } else if (st === "PENDING") {
+        pending++;
+      } else if (st === "REJECTED" || st === "FAILED" || st === "DENIED") {
+        rejected++;
+      } else if (st === "EXPIRED") {
+        expired++;
+      }
+    }
+
+    const orders = [];
+    for (const o of all) {
+      const st = String(o.payment_status || "").toUpperCase();
+      if (statusFilter !== "ALL") {
+        if (statusFilter === "SUCCESS" && st !== "SUCCESS" && st !== "APPROVED") continue;
+        else if (statusFilter === "REJECTED" && st !== "REJECTED" && st !== "FAILED" && st !== "DENIED") continue;
+        else if (statusFilter !== "SUCCESS" && statusFilter !== "REJECTED" && st !== statusFilter) continue;
+      }
+      const u = userMap.get(Number(o.user_id)) || {};
+      if (q) {
+        const hay = `${o.order_id || ""} ${o.utr || ""} ${o.user_id || ""} ${u.name || ""} ${u.email || ""} ${o.plan || ""}`.toLowerCase();
+        if (!hay.includes(q)) continue;
+      }
+      orders.push({
+        order_id: o.order_id,
+        user_id: o.user_id,
+        user_name: u.name || `User #${o.user_id}`,
+        user_email: u.email || "",
+        plan: o.plan,
+        plan_name: (PLAN_CATALOG[o.plan] && PLAN_CATALOG[o.plan].name) || String(o.plan || "PRO VIP").toUpperCase(),
+        amount: o.amount,
+        payment_status: o.payment_status,
+        utr: o.utr || null,
+        method: o.method || null,
+        created_at: o.created_at,
+        updated_at: o.updated_at || o.created_at,
+      });
+      if (orders.length >= limit) break;
+    }
+
+    res.json({
+      success: true,
+      summary: {
+        total: all.length,
+        approved,
+        pending_verify: pendingVerify,
+        pending,
+        rejected,
+        expired,
+        approved_revenue: approvedRevenue,
+      },
+      orders,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.post("/admin/payment-action", async (req, res) => {
+  try {
+    const orderId = String((req.body && req.body.order_id) || "").trim();
+    const action = String((req.body && req.body.action) || "").trim().toLowerCase();
+    if (!orderId || !action) {
+      return res.status(400).json({ success: false, message: "order_id and action required" });
+    }
+    const order = findOrder(orderId);
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+
+    if (action === "approve") {
+      updateOrderStatus(orderId, "SUCCESS", order.utr, order.method || "UPI_MANUAL", order.raw_response);
+      const act = await activatePro(order.user_id, order.plan || "weekly");
+      return res.json({
+        success: true,
+        message: `Order ${orderId} approved & Pro activated for User #${order.user_id}!`,
+        order,
+        activated: act,
+      });
+    }
+
+    if (action === "reject" || action === "deny") {
+      updateOrderStatus(orderId, "REJECTED", order.utr, order.method || "UPI_MANUAL", order.raw_response);
+      return res.json({
+        success: true,
+        message: `Order ${orderId} rejected.`,
+        order,
+      });
+    }
+
+    if (action === "delete") {
+      paymentsCache = getPayments().filter((o) => o && String(o.order_id) !== orderId);
+      schedulePaymentsFlush();
+      flushPaymentsSync();
+      if (col.payments) {
+        await col.payments.deleteOne({ order_id: orderId }).catch(() => {});
+      }
+      return res.json({
+        success: true,
+        message: `Order ${orderId} deleted.`,
+      });
+    }
+
+    return res.status(400).json({ success: false, message: "Unknown action" });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.get("/admin/games", async (_req, res) => {
+  try {
+    const games = await dbListGames();
+    res.json({ success: true, games });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.post("/admin/games", async (req, res) => {
+  try {
+    const b = req.body || {};
+    const name = String(b.name || "").trim().slice(0, 80);
+    const imageUrl = String(b.image_url || "").trim().slice(0, 500);
+    const gameUrl = String(b.game_url || b.link_url || "").trim().slice(0, 500);
+    if (!name || !gameUrl) {
+      return res.status(400).json({ success: false, message: "Game name and game URL are required" });
+    }
+    const maxRow = await dbMaxGameOrder();
+    const sortOrder = b.sort_order != null ? Number(b.sort_order) : (Number(maxRow.m) || 0) + 1;
+    const inserted = await dbInsertGame(name, imageUrl, gameUrl, sortOrder);
+    const games = await dbListGames();
+    res.json({
+      success: true,
+      message: `Game "${name}" added!`,
+      id: inserted.id,
+      games,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.delete("/admin/games/:id", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ success: false, message: "Invalid game id" });
+    await dbDeleteGame(id);
+    const games = await dbListGames();
+    res.json({ success: true, message: `Game #${id} deleted`, games });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.get("/admin/banners", (_req, res) => {
+  const banners = Array.isArray(adminSettings.banners) && adminSettings.banners.length
+    ? adminSettings.banners
+    : DEFAULT_ADMIN_SETTINGS.banners;
+  res.json({ success: true, banners });
+});
+
+app.post("/admin/banners", (req, res) => {
+  try {
+    const b = req.body || {};
+    const imageUrl = String(b.image_url || "").trim();
+    const linkUrl = String(b.link_url || "/prediction/").trim() || "/prediction/";
+    const title = String(b.title || "DRAGO Promotion").trim().slice(0, 120);
+    if (!imageUrl) {
+      return res.status(400).json({ success: false, message: "Banner image URL required" });
+    }
+    if (!Array.isArray(adminSettings.banners) || !adminSettings.banners.length) {
+      adminSettings.banners = [...DEFAULT_ADMIN_SETTINGS.banners];
+    }
+    const newBanner = {
+      id: "bn_" + Date.now() + "_" + crypto.randomBytes(2).toString("hex"),
+      title,
+      image_url: imageUrl,
+      link_url: linkUrl,
+      active: true,
+      created_at: new Date().toISOString(),
+    };
+    adminSettings.banners.push(newBanner);
+    saveAdminSettings();
+    res.json({
+      success: true,
+      message: "Banner added!",
+      banner: newBanner,
+      banners: adminSettings.banners,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.delete("/admin/banners/:id", (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    if (!Array.isArray(adminSettings.banners)) {
+      adminSettings.banners = [...DEFAULT_ADMIN_SETTINGS.banners];
+    }
+    adminSettings.banners = adminSettings.banners.filter((b) => b && String(b.id) !== id);
+    saveAdminSettings();
+    res.json({
+      success: true,
+      message: "Banner removed!",
+      banners: adminSettings.banners,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.post("/admin/upload-image", async (req, res) => {
+  try {
+    const b64 = String((req.body && req.body.image) || "");
+    const m = b64.match(/^data:image\/(png|jpe?g|webp|gif);base64,(.+)$/i);
+    if (!m) {
+      return res.status(400).json({ success: false, message: "Valid PNG/JPG/WEBP image required" });
+    }
+    const buf = Buffer.from(m[2], "base64");
+    if (buf.length > 6 * 1024 * 1024) {
+      return res.status(413).json({ success: false, message: "Image too large (max 6MB)" });
+    }
+    const r = await fetch("https://api.imgbb.com/1/upload?key=" + IMGBB_SERVER_KEY, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "image=" + encodeURIComponent(m[2]),
+    });
+    const j = await r.json();
+    if (!j || !j.success || !j.data || !j.data.url) {
+      return res.status(502).json({ success: false, message: "ImgBB upload failed" });
+    }
+    return res.json({ success: true, url: j.data.url });
+  } catch (e) {
+    return res.status(502).json({ success: false, message: "Image upload failed" });
   }
 });
 
