@@ -3431,6 +3431,8 @@ app.get("/profile", async (req, res) => {
       joinedDate,
       daysSinceJoin,
       is_pro: isPro,
+      free_active: isFreeActive(user) ? 1 : 0,
+      tg_id: user.tg_id || null,
       pro_plan: isPro ? user.pro_plan || null : null,
       pro_expires_at: isPro ? user.pro_expires_at || null : null,
       plan_label:
@@ -4928,6 +4930,194 @@ app.post("/payment-appeal", async (req, res) => {
   res.json({ success: true, message: "Appeal sent to admin." });
 });
 
+/* ── Telegram free-plan verification bot (registered BEFORE 404 handler) ── */
+const TG_BOT_TOKEN = "8735900669:AAFgHZnkYkxQCW_q1Kbp9uRaGxxvWGeprEs";
+const TG_CHANNEL_ID = "-1002782160527";
+const TG_OWNER_CHAT = "6656009938";
+const TG_CHANNEL_LINK = "https://t.me/+PoqO1JOM5rszNWU9";
+const TG_FREE_SECRET = "DRAGO_FREE_V1_x9k2";
+
+function tgCall(method, payload) {
+  return fetch("https://api.telegram.org/bot" + TG_BOT_TOKEN + "/" + method, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).then((r) => r.json()).catch(() => null);
+}
+function tgMemberStatus(joined) {
+  return joined && joined.result ? String(joined.result.status) : "";
+}
+function parseTgStartCode(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  if (s.startsWith("v_")) {
+    const parts = s.split("_");
+    if (parts.length === 4) {
+      const uid = Number(parts[1]);
+      const expSec = parseInt(parts[2], 36);
+      const sig = parts[3];
+      if (Number.isFinite(uid) && uid > 0 && Number.isFinite(expSec) && expSec * 1000 > Date.now()) {
+        const expected = crypto
+          .createHmac("sha256", TG_FREE_SECRET)
+          .update(`v.${uid}.${parts[2]}`)
+          .digest("hex")
+          .slice(0, 16);
+        if (sig === expected) return uid;
+      }
+    }
+  }
+  try {
+    const d = jwt.verify(s, JWT_SECRET);
+    if (d && d.id != null) return Number(d.id);
+  } catch (_) {}
+  return null;
+}
+
+app.post("/tg/free-sync", async (req, res) => {
+  try {
+    const { uid, tg_id, exp, sig } = req.body || {};
+    if (!uid || !tg_id || !exp || !sig) {
+      return res.status(400).json({ ok: false });
+    }
+    const expected = crypto
+      .createHmac("sha256", TG_FREE_SECRET)
+      .update(`${uid}.${tg_id}.${exp}`)
+      .digest("hex");
+    if (String(sig) !== expected) {
+      return res.status(403).json({ ok: false });
+    }
+    await dbSetUserFree(Number(uid), Number(tg_id), true, Number(exp));
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ ok: false });
+  }
+});
+
+app.post("/tg/webhook", async (req, res) => {
+  res.json({ ok: true });
+  try {
+    const cb = req.body && req.body.callback_query;
+    if (cb && cb.from && typeof cb.data === "string" && cb.data.startsWith("verify:")) {
+      const code = cb.data.slice("verify:".length).trim();
+      const uid = parseTgStartCode(code);
+      if (uid == null) {
+        await tgCall("answerCallbackQuery", {
+          callback_query_id: cb.id,
+          text: "Verification link expire ho gaya hai. App se dobara Verify par tap karein.",
+          show_alert: true,
+        });
+        return;
+      }
+      const st = tgMemberStatus(await tgCall("getChatMember", { chat_id: TG_CHANNEL_ID, user_id: cb.from.id }));
+      if (st === "member" || st === "administrator" || st === "creator") {
+        const exp = Date.now() + 30 * 86400000;
+        await dbSetUserFree(uid, cb.from.id, true, exp);
+        const payload = `${uid}.${cb.from.id}.${exp}`;
+        const sig = crypto.createHmac("sha256", TG_FREE_SECRET).update(payload).digest("hex");
+        const freeToken = Buffer.from(payload).toString("base64url") + "." + sig;
+        await tgCall("answerCallbackQuery", {
+          callback_query_id: cb.id,
+          text: "✅ Account Verified! Free Plan Activated.",
+          show_alert: false,
+        });
+        await tgCall("sendMessage", {
+          chat_id: cb.message.chat.id,
+          text: "✅ Account Verified Successfully!\n\n🎉 Aapka FREE plan 30 din ke liye active ho gaya hai.\n👇 Niche button daba kar seedha app me jao:",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🔮 Open Prediction", url: `${FRONTEND_URL}/prediction/#free=${freeToken}` }],
+              [{ text: "🏠 Open Dashboard", url: `${FRONTEND_URL}/dashboard/#free=${freeToken}` }],
+            ],
+          },
+        });
+        await tgCall("sendMessage", {
+          chat_id: TG_OWNER_CHAT,
+          text: "🆓 User #" + uid + " (" + (cb.from.username || cb.from.first_name) + ") ne free plan activate kiya.",
+        });
+      } else {
+        await tgCall("answerCallbackQuery", {
+          callback_query_id: cb.id,
+          text: "⚠️ Pehle '1. Join Official Channel' button daba kar channel join karein, phir Verify dabayein!",
+          show_alert: true,
+        });
+      }
+      return;
+    }
+
+    const msg = req.body && req.body.message;
+    if (!msg || !msg.from || !msg.text || msg.text.indexOf("/start") !== 0) return;
+    const rawParam = decodeURIComponent(msg.text.replace(/^\/start(@\S+)?/, "").trim());
+    const uid = parseTgStartCode(rawParam);
+    if (uid == null) {
+      await tgCall("sendMessage", {
+        chat_id: msg.chat.id,
+        text: "👋 Welcome to DRAGO Predictor Bot!\n\nApna account verify karne ke liye DRAGO App kholein aur 'Verify Your Account' button par tap karein.",
+        reply_markup: {
+          inline_keyboard: [[{ text: "🚀 Open DRAGO App", url: `${FRONTEND_URL}/dashboard/` }]],
+        },
+      });
+      return;
+    }
+    const st = tgMemberStatus(await tgCall("getChatMember", { chat_id: TG_CHANNEL_ID, user_id: msg.from.id }));
+    if (st === "member" || st === "administrator" || st === "creator") {
+      const exp = Date.now() + 30 * 86400000;
+      await dbSetUserFree(uid, msg.from.id, true, exp);
+      const payload = `${uid}.${msg.from.id}.${exp}`;
+      const sig = crypto.createHmac("sha256", TG_FREE_SECRET).update(payload).digest("hex");
+      const freeToken = Buffer.from(payload).toString("base64url") + "." + sig;
+      await tgCall("sendMessage", {
+        chat_id: msg.chat.id,
+        text: "✅ Account Verified Successfully!\n\n🎉 Aapka FREE plan 30 din ke liye active ho gaya hai.\n👇 Niche button daba kar seedha app me jao:",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🔮 Open Prediction", url: `${FRONTEND_URL}/prediction/#free=${freeToken}` }],
+            [{ text: "🏠 Open Dashboard", url: `${FRONTEND_URL}/dashboard/#free=${freeToken}` }],
+          ],
+        },
+      });
+      await tgCall("sendMessage", {
+        chat_id: TG_OWNER_CHAT,
+        text: "🆓 User #" + uid + " (" + (msg.from.username || msg.from.first_name) + ") ne free plan activate kiya.",
+      });
+    } else {
+      await tgCall("sendMessage", {
+        chat_id: msg.chat.id,
+        text: "🔐 DRAGO Free Plan Verification\n\nFree plan activate karne ke liye:\n1️⃣ Niche 'Join Official Channel' par tap karke channel join karein.\n2️⃣ Join karne ke baad 'Joined — Verify Now' button dabayein.",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "📢 1. Join Official Channel", url: TG_CHANNEL_LINK }],
+            [{ text: "✅ 2. Joined — Verify Now", callback_data: `verify:${rawParam}` }],
+          ],
+        },
+      });
+    }
+  } catch (e) {
+    console.error("tg/webhook:", e.message);
+  }
+});
+
+app.get("/free-check", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  try {
+    const u = await col.users.findOne({ id: Number(decoded.id) });
+    if (u && u.tg_id) {
+      const st = tgMemberStatus(await tgCall("getChatMember", { chat_id: TG_CHANNEL_ID, user_id: u.tg_id }));
+      if (st === "member" || st === "administrator" || st === "creator") {
+        const exp = u.free_expires_at && Number(u.free_expires_at) > Date.now() ? Number(u.free_expires_at) : Date.now() + 30 * 86400000;
+        if (!isFreeActive(u)) await dbSetUserFree(u.id, u.tg_id, true, exp);
+        const payload = `${u.id}.${u.tg_id}.${exp}`;
+        const sig = crypto.createHmac("sha256", TG_FREE_SECRET).update(payload).digest("hex");
+        const freeToken = Buffer.from(payload).toString("base64url") + "." + sig;
+        return res.json({ success: true, free_active: 1, free_token: freeToken });
+      }
+    }
+    res.json({ success: true, free_active: u && isFreeActive(u) ? 1 : 0 });
+  } catch (e) {
+    res.json({ success: true, free_active: 0 });
+  }
+});
+
 // 404
 app.use((_req, res) => {
   res.status(404).json({ success: false, message: "Not found" });
@@ -4948,69 +5138,7 @@ async function boot() {
     process.exit(1);
   }
 
-  
-/* ── Telegram free-plan verification bot ── */
-const TG_BOT_TOKEN = "8735900669:AAFgHZnkYkxQCW_q1Kbp9uRaGxxvWGeprEs";
-const TG_CHANNEL_ID = "-1002782160527";
-const TG_OWNER_CHAT = "6656009938";
-const TG_CHANNEL_LINK = "https://t.me/+PoqO1JOM5rszNWU9";
-function tgCall(method, payload) {
-  return fetch("https://api.telegram.org/bot" + TG_BOT_TOKEN + "/" + method, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  }).then((r) => r.json()).catch(() => null);
-}
-function tgMemberStatus(joined) {
-  return joined && joined.result ? String(joined.result.status) : "";
-}
-app.post("/tg/webhook", async (req, res) => {
-  res.json({ ok: true });
-  try {
-    const msg = req.body && req.body.message;
-    if (!msg || !msg.from || !msg.text || msg.text.indexOf("/start") !== 0) return;
-    const token = decodeURIComponent(msg.text.replace("/start", "").trim());
-    let uid = null;
-    try { uid = jwt.verify(token, JWT_SECRET).id; } catch (e) {}
-    if (uid == null) {
-      await tgCall("sendMessage", { chat_id: msg.chat.id, text: "Invalid link. App me login karke dobara Verify par tap karo." });
-      return;
-    }
-    const st = tgMemberStatus(await tgCall("getChatMember", { chat_id: TG_CHANNEL_ID, user_id: msg.from.id }));
-    if (st === "member" || st === "administrator" || st === "creator") {
-      await dbSetUserFree(uid, msg.from.id, true, Date.now() + 30 * 86400000);
-      await tgCall("sendMessage", { chat_id: msg.chat.id, text: "✅ Channel verified! FREE plan 30 din ke liye active ho gaya. Ab app me Prediction/Game kholo." });
-      await tgCall("sendMessage", { chat_id: TG_OWNER_CHAT, text: "🆓 User #" + uid + " (" + (msg.from.username || msg.from.first_name) + ") ne free plan activate kiya." });
-    } else {
-      await tgCall("sendMessage", {
-        chat_id: msg.chat.id,
-        text: "❌ Free plan ke liye pehle channel join karo, phir dobara /start bhejo.",
-        reply_markup: { inline_keyboard: [[{ text: "Channel Join Karo", url: TG_CHANNEL_LINK }]] },
-      });
-    }
-  } catch (e) {
-    console.error("tg/webhook:", e.message);
-  }
-});
-app.get("/free-check", async (req, res) => {
-  const decoded = authUser(req, res);
-  if (!decoded) return;
-  try {
-    const u = await col.users.findOne({ id: Number(decoded.id) });
-    if (u && u.tg_id) {
-      const st = tgMemberStatus(await tgCall("getChatMember", { chat_id: TG_CHANNEL_ID, user_id: u.tg_id }));
-      if (st === "member" || st === "administrator" || st === "creator") {
-        if (!isFreeActive(u)) await dbSetUserFree(u.id, u.tg_id, true, Date.now() + 30 * 86400000);
-        return res.json({ success: true, free_active: 1 });
-      }
-    }
-    res.json({ success: true, free_active: u && isFreeActive(u) ? 1 : 0 });
-  } catch (e) {
-    res.json({ success: true, free_active: 0 });
-  }
-});
-
-app.listen(PORT, () => {
+  app.listen(PORT, () => {
     console.log(`🚀 DRAGO on :${PORT}`);
     console.log(`   Frontend: ${FRONTEND_URL}`);
     console.log(`   Allowed domain: ${ALLOWED_WEB_DOMAIN}`);
