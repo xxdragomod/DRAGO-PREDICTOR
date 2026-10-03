@@ -1,6 +1,7 @@
 {
   "name": "drago-backend",
   "version": "3.0.0",
+  "type": "commonjs",
   "description": "DRAGO main API on Render — auth, payment, proxy to orihost",
   "main": "server.js",
   "scripts": {

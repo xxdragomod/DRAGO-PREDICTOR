@@ -1,8 +1,0 @@
-node_modules/
-.env
-*.log
-payments.json
-admin-settings.json
-wingo30s_history.json
-.DS_Store
-.vercel

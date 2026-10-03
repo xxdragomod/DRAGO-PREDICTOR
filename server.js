@@ -172,7 +172,53 @@ const col = {
   api_keys: null,
   api_usage: null,
   counters: null,
+  banned_devices: null,
+  payments: null,
+  kv_store: null,
 };
+
+function escTgMd(val, maxLen = 200) {
+  return String(val == null ? "" : val)
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/([_*`\[\]\\])/g, "")
+    .trim()
+    .slice(0, maxLen);
+}
+
+function hasValidImageMagicBytes(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 12) return false;
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    buf[0] === 0x89 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x4e &&
+    buf[3] === 0x47 &&
+    buf[4] === 0x0d &&
+    buf[5] === 0x0a &&
+    buf[6] === 0x1a &&
+    buf[7] === 0x0a
+  ) {
+    return true;
+  }
+  // JPEG: FF D8 FF
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    return true;
+  }
+  // WEBP: RIFF....WEBP
+  if (
+    buf[0] === 0x52 &&
+    buf[1] === 0x49 &&
+    buf[2] === 0x46 &&
+    buf[3] === 0x46 &&
+    buf[8] === 0x57 &&
+    buf[9] === 0x45 &&
+    buf[10] === 0x42 &&
+    buf[11] === 0x50
+  ) {
+    return true;
+  }
+  return false;
+}
 
 async function nextSeq(name) {
   const r = await col.counters.findOneAndUpdate(
@@ -299,6 +345,8 @@ async function connectMongo() {
   col.api_usage = db.collection("api_usage");
   col.counters = db.collection("counters");
   col.banned_devices = db.collection("banned_devices");
+  col.payments = db.collection("payments");
+  col.kv_store = db.collection("kv_store");
 
   // Minimal indexes only (no bloat)
   // safeIndex: agar purana index same name se alag options ke saath exist kare
@@ -338,6 +386,9 @@ async function connectMongo() {
     safeIndex(col.api_usage, { user_id: 1, day: 1 }),
     // TTL on expire_at Date → auto-purge usage older than ~90 days
     safeIndex(col.api_usage, { expire_at: 1 }, { expireAfterSeconds: 0 }),
+    // Persistent MongoDB payment orders with unique order_id index (BE-7)
+    safeIndex(col.payments, { order_id: 1 }, { unique: true }),
+    safeIndex(col.payments, { user_id: 1, created_at: -1 }),
   ]);
   // Deduplicate any historical duplicate tg_id assignments so strictly 1 Telegram account = 1 DRAGO ID
   try {
@@ -945,6 +996,15 @@ function saveAnnouncement(a) {
   } catch (e) {
     console.warn("announcement save:", e.message);
   }
+  if (col.kv_store) {
+    col.kv_store
+      .updateOne(
+        { _id: "announcement" },
+        { $set: { value: a, updated_at: new Date().toISOString() } },
+        { upsert: true }
+      )
+      .catch((err) => console.warn("mongo announcement save:", err.message));
+  }
 }
 
 /* ── Imgbb server-side upload (Telegram photo → public URL) ── */
@@ -1019,6 +1079,15 @@ function saveAdminSettings() {
     );
   } catch (e) {
     console.error("admin-settings save:", e.message);
+  }
+  if (col.kv_store) {
+    col.kv_store
+      .updateOne(
+        { _id: "admin_settings" },
+        { $set: { value: adminSettings, updated_at: new Date().toISOString() } },
+        { upsert: true }
+      )
+      .catch((err) => console.warn("mongo admin-settings save:", err.message));
   }
 }
 loadAdminSettings();
@@ -1353,6 +1422,71 @@ function findPendingManual(userId, planKey) {
   );
 }
 
+function persistOrderToMongo(row) {
+  if (!row || !row.order_id || !col.payments) return;
+  const copy = { ...row };
+  delete copy._id;
+  col.payments
+    .updateOne(
+      { order_id: String(row.order_id) },
+      { $set: copy },
+      { upsert: true }
+    )
+    .catch((e) => console.warn("mongo payment upsert:", e.message));
+}
+
+async function syncPaymentsAndSettingsFromMongo() {
+  try {
+    if (col.kv_store) {
+      const [settingsDoc, annDoc] = await Promise.all([
+        col.kv_store.findOne({ _id: "admin_settings" }),
+        col.kv_store.findOne({ _id: "announcement" }),
+      ]);
+      if (settingsDoc && settingsDoc.value && typeof settingsDoc.value === "object") {
+        adminSettings = { ...DEFAULT_ADMIN_SETTINGS, ...settingsDoc.value };
+      } else {
+        await col.kv_store.updateOne(
+          { _id: "admin_settings" },
+          { $set: { value: adminSettings, updated_at: new Date().toISOString() } },
+          { upsert: true }
+        );
+      }
+      if (annDoc && annDoc.value !== undefined) {
+        announcement = annDoc.value;
+      }
+    }
+    if (col.payments) {
+      const localRows = getPayments();
+      const mongoRows = await col.payments
+        .find({})
+        .sort({ created_at: 1 })
+        .toArray();
+      const mergedMap = new Map();
+      for (const r of localRows) {
+        if (r && r.order_id) mergedMap.set(String(r.order_id), r);
+      }
+      for (const r of mongoRows) {
+        if (r && r.order_id) {
+          const clean = { ...r };
+          delete clean._id;
+          mergedMap.set(String(r.order_id), clean);
+        }
+      }
+      paymentsCache = Array.from(mergedMap.values());
+      // Backfill any local-only orders into MongoDB
+      const mongoIds = new Set(mongoRows.map((x) => String(x.order_id)));
+      for (const r of paymentsCache) {
+        if (r && r.order_id && !mongoIds.has(String(r.order_id))) {
+          persistOrderToMongo(r);
+        }
+      }
+      flushPaymentsSync();
+    }
+  } catch (e) {
+    console.warn("syncPaymentsAndSettingsFromMongo:", e.message);
+  }
+}
+
 function insertOrder({
   order_id,
   user_id,
@@ -1381,6 +1515,7 @@ function insertOrder({
     updated_at: now,
   };
   getPayments().push(row);
+  persistOrderToMongo(row);
   schedulePaymentsFlush();
   flushPaymentsSync();
   return row;
@@ -1398,13 +1533,14 @@ function updateOrderStatus(orderId, payment_status, utr, method, raw_response) {
       : null;
   }
   row.updated_at = new Date().toISOString();
+  persistOrderToMongo(row);
   schedulePaymentsFlush();
   flushPaymentsSync();
   return row;
 }
 
 function expireStaleOrders() {
-  // PENDING older than 10 min → EXPIRED (still kept forever in payments.json)
+  // PENDING older than 10 min → EXPIRED (still kept forever in MongoDB & payments.json)
   try {
     const cutoff = Date.now() - PAYMENT_TTL_MS;
     let changed = false;
@@ -1416,6 +1552,7 @@ function expireStaleOrders() {
       if (Number.isFinite(t) && t < cutoff) {
         o.payment_status = "EXPIRED";
         o.updated_at = new Date().toISOString();
+        persistOrderToMongo(o);
         changed = true;
       }
     }
@@ -1585,13 +1722,13 @@ async function notifyAdminManualPayment({ orderId, user, planKey, amount, utr })
   const when = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
   const text =
     `🧾 *New manual payment*\n\n` +
-    `👤 Name: ${user.name || "—"}\n` +
-    `📧 Email: ${user.email || "—"}\n` +
-    `🆔 User ID: #${user.id || "—"}\n` +
-    `📦 Plan: ${plan ? `${plan.name} (${plan.days} Days)` : planKey}\n` +
-    `💰 Amount: ₹${amount}\n` +
-    `🔖 UTR: \`${utr}\`\n` +
-    `🆔 Order: \`${orderId}\`\n` +
+    `👤 Name: ${escTgMd(user.name || "—", 80)}\n` +
+    `📧 Email: ${escTgMd(user.email || "—", 120)}\n` +
+    `🆔 User ID: #${escTgMd(user.id || "—", 24)}\n` +
+    `📦 Plan: ${plan ? `${escTgMd(plan.name, 60)} (${plan.days} Days)` : escTgMd(planKey, 30)}\n` +
+    `💰 Amount: ₹${Number(amount) || 0}\n` +
+    `🔖 UTR: \`${escTgMd(utr, 32)}\`\n` +
+    `🆔 Order: \`${escTgMd(orderId, 48)}\`\n` +
     `🕐 Time: ${when} IST`;
 
   // callback_data max 64 bytes — short codes
@@ -1633,11 +1770,11 @@ async function notifyAdminDevtoolsBan({ user, userId, reason, device }) {
   const when = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
   const text =
     `🚨 *DevTools detected — BLOCKED*\n\n` +
-    `👤 Name: ${(user && user.name) || "— (not logged in)"}\n` +
-    `📧 Email: ${(user && user.email) || "—"}\n` +
-    `🆔 User ID: ${userId ? `\`${userId}\`` : "—"}\n` +
-    `📱 Device: \`${device || "—"}\`\n` +
-    `🧾 Reason: ${String(reason || "devtools").slice(0, 80)}\n` +
+    `👤 Name: ${escTgMd((user && user.name) || "— (not logged in)", 80)}\n` +
+    `📧 Email: ${escTgMd((user && user.email) || "—", 120)}\n` +
+    `🆔 User ID: ${userId ? `\`${escTgMd(userId, 24)}\`` : "—"}\n` +
+    `📱 Device: \`${escTgMd(device || "—", 64)}\`\n` +
+    `🧾 Reason: ${escTgMd(reason || "devtools", 80)}\n` +
     `🕐 Time: ${when} IST\n\n` +
     `UNLOCK → user wapas app use kar payega\nBAN → permanent ban (site hamesha 404 dikhegi)`;
   // Logged-in → user buttons; device-only → device buttons (warna "bad user id")
@@ -1670,14 +1807,14 @@ async function notifyAdminDevtoolsBan({ user, userId, reason, device }) {
   return result;
 }
 
-/** Shared Approve / Deny handler (webhook + polling) */
+/** Shared Approve / Deny handler (polling) */
 /** Bug report → Telegram group (group bot bhejta hai; fallback admin bot) */
 async function sendBugReportToGroup(report) {
   const text =
     `🐞 *Bug Report — DRAGO Predictor*\n\n` +
-    `👤 User: ${report.name} (#${report.userId})\n` +
-    `🧩 Area: ${report.category}\n` +
-    `📝 Issue: ${report.description}`;
+    `👤 User: ${escTgMd(report.name, 80)} (#${escTgMd(report.userId, 24)})\n` +
+    `🧩 Area: ${escTgMd(report.category, 60)}\n` +
+    `📝 Issue: ${escTgMd(report.description, 1200)}`;
   const payload = {
     chat_id: TELEGRAM_REPORT_GROUP_ID,
     text,
@@ -1694,6 +1831,17 @@ async function handleTelegramCallback(cb) {
   const data = String(cb.data);
   const chatId = cb.message && cb.message.chat && cb.message.chat.id;
   const msgId = cb.message && cb.message.message_id;
+  const fromId = cb.from && cb.from.id;
+
+  // CRITICAL (BE-1): Strictly verify Telegram admin identity at the top of handleTelegramCallback
+  if (!isTelegramAdmin(fromId) && !isTelegramAdmin(chatId)) {
+    await telegramApi("answerCallbackQuery", {
+      callback_query_id: cb.id,
+      text: "Unauthorized: Admin only",
+      show_alert: true,
+    });
+    return;
+  }
 
   // 📢 Announcement broadcast — conversation start
   if (data === "act:announce") {
@@ -2891,8 +3039,17 @@ const STATE_TTL_MS = 10 * 60 * 1000;
 function sanitizeReturnTo(u) {
   try {
     const parsed = new URL(String(u || ""));
+    const origin = parsed.origin;
     const h = parsed.hostname.toLowerCase();
-    if (h.endsWith(".vercel.app") || h === "localhost" || h === "127.0.0.1") return parsed.origin;
+    if (
+      origin === FRONTEND_URL ||
+      origin === "https://dragopredictor.vercel.app" ||
+      h === ALLOWED_WEB_DOMAIN ||
+      h === "localhost" ||
+      h === "127.0.0.1"
+    ) {
+      return origin;
+    }
   } catch (_) {}
   return null;
 }
@@ -2933,9 +3090,18 @@ function publicBase(req) {
   return `${proto}://${host}`;
 }
 
+const revokedTokenJtis = new Map(); // jti -> expiresAtMs
+
 function signToken(user) {
+  const jti = crypto.randomBytes(12).toString("hex");
   return jwt.sign(
-    { id: user.id, email: user.email, name: user.name },
+    {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      tv: Number(user.token_version) || 0,
+      jti,
+    },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN }
   );
@@ -2943,7 +3109,11 @@ function signToken(user) {
 
 function decodeToken(token) {
   try {
-    return jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (decoded && decoded.jti && revokedTokenJtis.has(decoded.jti)) {
+      return null;
+    }
+    return decoded;
   } catch {
     return null;
   }
@@ -3057,7 +3227,27 @@ function isAllowedWebDomain(domain) {
   return d === ALLOWED_WEB_DOMAIN || d === "localhost" || d === "127.0.0.1";
 }
 
-/** Frontend routes: domain + App-Id + timestamp + HMAC signature */
+// Nonce replay protection store (BE-13)
+const usedNonces = new Map(); // nonce -> timestamp
+const NONCE_TTL_MS = 5 * 60 * 1000;
+
+function checkAndRecordNonce(nonce) {
+  if (!nonce) return true;
+  const now = Date.now();
+  const prev = usedNonces.get(nonce);
+  if (prev && now - prev < NONCE_TTL_MS) {
+    return false;
+  }
+  usedNonces.set(nonce, now);
+  if (usedNonces.size > 10000) {
+    for (const [k, ts] of usedNonces) {
+      if (now - ts >= NONCE_TTL_MS) usedNonces.delete(k);
+    }
+  }
+  return true;
+}
+
+/** Frontend routes: strict origin check + optional nonce replay protection (BE-3, BE-6, BE-13) */
 function requireAppSignature(mode) {
   return function appSigMiddleware(req, res, next) {
     if (req.path.startsWith("/v1") || String(req.originalUrl || "").startsWith("/v1")) {
@@ -3067,62 +3257,29 @@ function requireAppSignature(mode) {
     const origin = req.get("origin") || "";
     const domain = clientDomain(req);
 
-    // Browser requests must come from allowed frontend domain
+    // Exact origin allow-list (BE-6: no wildcard *.vercel.app)
     if (origin) {
       try {
         const host = new URL(origin).hostname.toLowerCase();
-        if (
-          host !== ALLOWED_WEB_DOMAIN &&
-          host !== "localhost" &&
-          host !== "127.0.0.1" &&
-          !host.endsWith(".vercel.app")
-        ) {
-          return res.status(404).json({ success: false, message: "Not found" });
+        if (!isAllowedWebDomain(host)) {
+          return res.status(403).json({ success: false, message: "Origin not allowed" });
         }
       } catch (_) {
-        return res.status(404).json({ success: false, message: "Not found" });
+        return res.status(403).json({ success: false, message: "Origin not allowed" });
       }
-    } else if (domain && !isAllowedWebDomain(domain) && !String(domain).endsWith(".vercel.app")) {
-      return res.status(404).json({ success: false, message: "Not found" });
-    }
-
-    // Optional hardening when client sends App-Id / signature
-    const appId = String(req.get("x-app-id") || "").trim();
-    if (
-      appId && APP_ID &&
-      !timingSafeEqualStr(appId, APP_ID) &&
-      !(APP_ID_PREV && timingSafeEqualStr(appId, APP_ID_PREV))
-    ) {
-      console.warn("app-id mismatch:", appId);
+    } else if (domain && !isAllowedWebDomain(domain)) {
+      return res.status(403).json({ success: false, message: "Domain not allowed" });
     }
 
     const ts = String(req.get("x-timestamp") || "").trim();
-    const sig = String(req.get("x-signature") || "").trim();
     const nonce = String(req.get("x-nonce") || "").trim();
-    const userIdHdr = String(req.get("x-user-id") || "").trim();
-    const userNameHdr = String(req.get("x-user-name") || "").trim();
-
-    if (sig && APP_SECRET && ts) {
-      const pathOnly = String(req.originalUrl || req.url || "").split("?")[0];
-      const payload = buildSignPayload({
-        method: req.method,
-        pathOnly,
-        timestamp: ts,
-        nonce: mode === "payment" ? nonce : "",
-        body: req.method === "GET" || req.method === "HEAD" ? "" : req.body,
-        userId: mode === "auth" || mode === "payment" ? userIdHdr : "",
-        userName: mode === "auth" || mode === "payment" ? userNameHdr : "",
-      });
-      const expected = hmacSign(payload);
-      const expectedPrev = APP_SECRET_PREV
-        ? crypto.createHmac("sha256", APP_SECRET_PREV).update(payload).digest("hex")
-        : "";
-      if (!timingSafeEqualStr(sig, expected) && !(expectedPrev && timingSafeEqualStr(sig, expectedPrev))) {
-        console.warn("signature mismatch", pathOnly);
+    if (mode === "payment" && nonce) {
+      if (!checkAndRecordNonce(nonce)) {
+        return res.status(409).json({ success: false, message: "Duplicate request nonce" });
       }
     }
 
-    req.dragoMeta = { domain, appId, ts, nonce, userIdHdr, userNameHdr };
+    req.dragoMeta = { domain, ts, nonce };
     next();
   };
 }
@@ -3131,20 +3288,57 @@ function requireAppSignature(mode) {
 const app = express();
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
+
+// Security headers & Request-ID middleware (BE-16)
+app.use((req, res, next) => {
+  const reqId = crypto.randomBytes(8).toString("hex");
+  req.reqId = reqId;
+  res.setHeader("X-Request-Id", reqId);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader(
+    "Strict-Transport-Security",
+    "max-age=63072000; includeSubDomains; preload"
+  );
+  next();
+});
+
 /* ═══ SECURITY HARDENING ═══
    - imgbb key sirf server-side (FE se hataya)
-   - per-user rate limits: uploads 10/hr, bug 5/hr, winfb 5/hr, appeal 10/day
-   - image validation: type + size (magic prefix + 4MB cap)                */
+   - bounded rate limiter without global reset bug (BE-8)
+   - image validation: magic bytes + 4MB cap (BE-18) */
 const RL = new Map();
 function rateLimitUser(key, max, windowMs) {
   const now = Date.now();
-  const rec = RL.get(key) || { t: now, n: 0 };
-  if (now - rec.t > windowMs) { rec.t = now; rec.n = 0; }
+  let rec = RL.get(key);
+  if (!rec || now - rec.t > windowMs) {
+    rec = { t: now, n: 0, w: windowMs };
+  }
   rec.n++;
   RL.set(key, rec);
-  if (RL.size > 8000) RL.clear();
+  if (RL.size > 10000) {
+    for (const [k, v] of RL) {
+      if (now - v.t > (v.w || windowMs)) RL.delete(k);
+      if (RL.size <= 8000) break;
+    }
+    if (RL.size > 10000) {
+      const oldestKey = RL.keys().next().value;
+      if (oldestKey) RL.delete(oldestKey);
+    }
+  }
   return rec.n <= max;
 }
+
+// Global per-IP rate limit (BE-8)
+app.use((req, res, next) => {
+  const ip = String(req.ip || req.socket?.remoteAddress || "unknown");
+  if (!rateLimitUser("ip:" + ip, 240, 60000)) {
+    return res.status(429).json({ success: false, message: "Too many requests. Please slow down." });
+  }
+  next();
+});
+
 const IMGBB_SERVER_KEY = process.env.IMGBB_API_KEY || "6142948bcadb2c67ba10e4f77fd96a72";
 
 app.use("/upload-image", express.json({ limit: "6mb" }));
@@ -3159,6 +3353,9 @@ app.post("/upload-image", async (req, res) => {
   const buf = Buffer.from(m[2], "base64");
   if (buf.length > 4 * 1024 * 1024)
     return res.status(413).json({ success: false, message: "Image too large (max 4MB)." });
+  if (!hasValidImageMagicBytes(buf)) {
+    return res.status(400).json({ success: false, message: "Invalid image file contents." });
+  }
   try {
     const r = await fetch("https://api.imgbb.com/1/upload?key=" + IMGBB_SERVER_KEY, {
       method: "POST",
@@ -3184,25 +3381,24 @@ const allowedOrigins = [
   "http://127.0.0.1:3000",
 ].filter(Boolean);
 
-// Block unknown browser origins on app routes (not /v1)
+// Block unknown browser origins on app routes (not /v1) — strict allow-list (BE-6)
 app.use((req, res, next) => {
   const isV1 = req.path.startsWith("/v1") || String(req.originalUrl || "").startsWith("/v1");
   if (isV1) return next();
   const origin = req.get("origin");
   if (!origin) return next();
   try {
-    const host = new URL(origin).hostname;
+    const host = new URL(origin).hostname.toLowerCase();
     if (
       allowedOrigins.includes(origin) ||
       host === ALLOWED_WEB_DOMAIN ||
-      host.endsWith(".vercel.app") ||
       host === "localhost" ||
       host === "127.0.0.1"
     ) {
       return next();
     }
   } catch (_) {}
-  return res.status(404).json({ success: false, message: "Not found" });
+  return res.status(403).json({ success: false, message: "Origin not allowed" });
 });
 
 app.use(
@@ -3211,12 +3407,12 @@ app.use(
       if (!origin) return cb(null, true);
       if (allowedOrigins.includes(origin)) return cb(null, true);
       try {
-        const host = new URL(origin).hostname || "";
+        const host = new URL(origin).hostname.toLowerCase();
         if (host === ALLOWED_WEB_DOMAIN || host === "localhost" || host === "127.0.0.1") {
           return cb(null, true);
         }
       } catch (_) {}
-      return cb(null, true);
+      return cb(null, false);
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: [
@@ -3273,13 +3469,12 @@ app.use("/v1", (req, res, next) => {
 });
 
 // Explicit OPTIONS for all routes (Cloudflare / some proxies need this)
-app.options("*", cors({ origin: true }));
+app.options("*", cors());
 
-// Signature gates (domain + App-Id + HMAC). /v1 skipped inside middleware.
+// Signature gates (domain + nonce). /v1 skipped inside middleware.
 const sigAuth = requireAppSignature("auth");
 const sigPay = requireAppSignature("payment");
 const sigPublic = requireAppSignature("public-app");
-
 
 async function rejectIfBanned(req, res, next) {
   try {
@@ -3287,6 +3482,18 @@ async function rejectIfBanned(req, res, next) {
     if (!token) return next();
     const decoded = decodeToken(token);
     if (!decoded || !decoded.id) return next();
+    if (col.users) {
+      const u = await col.users.findOne(
+        { id: Number(decoded.id) },
+        { projection: { token_version: 1, banned: 1, ban_state: 1, ban_reason: 1 } }
+      );
+      if (u && Number(u.token_version || 0) > Number(decoded.tv || 0)) {
+        return res.status(401).json({
+          success: false,
+          message: "Session invalidated. Please sign in again.",
+        });
+      }
+    }
     const ban = await dbIsUserBanned(decoded.id);
     if (ban.banned) {
       return res.status(403).json({
@@ -3307,23 +3514,20 @@ app.use(["/verify", "/profile", "/prediction-quota", "/wingo30s_prediction", "/p
 app.use(["/verify", "/profile", "/prediction-quota", "/wingo30s_prediction", "/payment-history", "/api-keys", "/api-usage", "/system-status", "/games"], sigAuth);
 app.use("/api-keys", sigAuth);
 
-/* ── Shield integrity: client guard zinda hona zaroori hai, warna prediction band ── */
+/* ── Shield telemetry (BE-4: non-blocking signal; real auth relies on JWT + server entitlements) ── */
 const SHIELD_SALT = "DRAGO_SHIELD_V2_8kq2";
 function shieldDjb2(s) {
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
   return (h >>> 0).toString(36);
 }
-function shieldCheck(req, res, next) {
+function shieldCheck(req, _res, next) {
   const s = String(req.get("x-shield") || "");
   const b = Math.floor(Date.now() / 30000);
-  if (
+  req.shieldValid =
     s === shieldDjb2(SHIELD_SALT + "|" + b) ||
-    s === shieldDjb2(SHIELD_SALT + "|" + (b - 1))
-  ) {
-    return next();
-  }
-  return res.status(403).json({ success: false, message: "Security check failed" });
+    s === shieldDjb2(SHIELD_SALT + "|" + (b - 1));
+  next();
 }
 app.use(["/wingo30s_prediction", "/prediction-quota"], shieldCheck);
 // Market data (no JWT) — frontend prediction page ka live chart yahin se leta hai
@@ -3351,6 +3555,10 @@ app.get("/", (_req, res) => {
  * Client ID/Secret kabhi frontend pe nahi jaate.
  */
 app.get("/auth/google", (req, res) => {
+  const ip = String(req.ip || req.socket?.remoteAddress || "unknown");
+  if (!rateLimitUser("auth_ip:" + ip, 25, 60000)) {
+    return res.status(429).json({ success: false, message: "Too many login attempts. Please wait." });
+  }
   if (!adminSettings.google_auth_enabled) {
     return res.status(403).json({
       success: false,
@@ -3386,6 +3594,10 @@ app.get("/auth/google", (req, res) => {
  * Google callback → exchange code → upsert user → JWT → frontend #token=
  */
 app.get("/auth/google/callback", async (req, res) => {
+  const ip = String(req.ip || req.socket?.remoteAddress || "unknown");
+  if (!rateLimitUser("auth_cb:" + ip, 30, 60000)) {
+    return res.status(429).send("Too many requests");
+  }
   const fail = (reason) => {
     console.error("OAuth fail:", reason);
     res.redirect(`${FRONTEND_URL}/?error=google_auth_failed`);
@@ -3454,38 +3666,56 @@ app.get("/auth/google/callback", async (req, res) => {
   }
 });
 
-/** Session check — dashboard / guards */
+/** Session revocation & logout endpoints (BE-10, PR-6) */
+app.post("/auth/logout", (req, res) => {
+  const token = bearerToken(req);
+  const decoded = token ? decodeToken(token) : null;
+  if (decoded && decoded.jti) {
+    revokedTokenJtis.set(decoded.jti, Date.now());
+  }
+  res.json({ success: true });
+});
 
-/** Ban account (e.g. client security report) — JWT required */
+app.post("/auth/logout-all", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  if (decoded.jti) revokedTokenJtis.set(decoded.jti, Date.now());
+  try {
+    await col.users.updateOne(
+      { id: Number(decoded.id) },
+      { $inc: { token_version: 1 } }
+    );
+    res.json({ success: true, message: "All sessions invalidated." });
+  } catch (e) {
+    res.status(500).json({ success: false, message: "Failed to revoke sessions." });
+  }
+});
+
+/** Ban account (e.g. client security report) — JWT required (BE-5, AUDIT-8: no unauthenticated arbitrary device bans) */
 app.post("/security/devtools-ban", async (req, res) => {
+  const ip = String(req.ip || req.socket?.remoteAddress || "unknown");
+  if (!rateLimitUser("sec_ban:" + ip, 10, 3600000)) {
+    return res.status(429).json({ success: false, message: "Too many security reports." });
+  }
   const reason = String((req.body && req.body.reason) || "devtools").slice(0, 120);
-  const device = String((req.body && req.body.device) || "").slice(0, 64);
+  const rawDevice = String((req.body && req.body.device) || "").trim();
+  const device = /^[a-zA-Z0-9_-]{6,64}$/.test(rawDevice) ? rawDevice : "";
   const token = bearerToken(req);
   const decoded = token ? decodeToken(token) : null;
   try {
-    // Logged-in user → account + device dono block
-    if (decoded && decoded.id) {
-      const prev = await dbIsUserBanned(decoded.id);
-      if (prev.banned && prev.state === "banned") {
-        return res.json({ success: true, banned: true, state: "banned" });
-      }
-      const ok = await dbBlockUser(decoded.id, reason, device);
-      console.warn("🚫 BLOCK user=", decoded.id, "reason=", reason, "device=", device || "-");
-      const user = await dbFindUserByIdLite(decoded.id);
-      await notifyAdminDevtoolsBan({ user, userId: decoded.id, reason, device });
-      return res.json({ success: true, banned: true, state: "blocked", applied: !!ok });
+    // Only authenticated users can trigger an account/device block for their own session (BE-5)
+    if (!decoded || !decoded.id) {
+      return res.status(401).json({ success: false, message: "Authentication required" });
     }
-    // Bina login → sirf device block (login page pe bhi detect ho to)
-    if (device) {
-      const prevDev = await dbBanStateByDevice(device);
-      if (prevDev !== "banned") {
-        await dbBlockDevice(device, reason);
-        console.warn("🚫 BLOCK device=", device, "reason=", reason);
-        await notifyAdminDevtoolsBan({ user: null, userId: null, reason, device });
-      }
-      return res.json({ success: true, banned: true, state: prevDev === "banned" ? "banned" : "blocked" });
+    const prev = await dbIsUserBanned(decoded.id);
+    if (prev.banned && prev.state === "banned") {
+      return res.json({ success: true, banned: true, state: "banned" });
     }
-    return res.status(400).json({ success: false, message: "No identity" });
+    const ok = await dbBlockUser(decoded.id, reason, device);
+    console.warn("🚫 BLOCK user=", decoded.id, "reason=", reason, "device=", device || "-");
+    const user = await dbFindUserByIdLite(decoded.id);
+    await notifyAdminDevtoolsBan({ user, userId: decoded.id, reason, device });
+    return res.json({ success: true, banned: true, state: "blocked", applied: !!ok });
   } catch (e) {
     console.error("devtools-ban:", e.message);
     return res.status(500).json({ success: false, message: "Ban failed" });
@@ -3639,6 +3869,9 @@ app.get("/payment-config", (req, res) => {
 app.get("/wingo30s_prediction", async (req, res) => {
   const decoded = authUser(req, res);
   if (!decoded) return;
+  if (!rateLimitUser("pred:" + decoded.id, 30, 60000)) {
+    return res.status(429).json({ success: false, message: "Too many prediction requests. Please wait." });
+  }
 
   const user = await dbFindUserById(decoded.id);
   if (!user) {
@@ -3651,6 +3884,13 @@ app.get("/wingo30s_prediction", async (req, res) => {
   const wantConsume = !isPro || String(req.query.consume || "") === "1";
 
   if (!isPro) {
+    if (!isFreeActive(user)) {
+      return res.status(403).json({
+        success: false,
+        verification_required: true,
+        message: "Verify your Telegram account on Dashboard to unlock your 3 Free Predictions.",
+      });
+    }
     if (freeUsed >= freePredLimit()) {
       return res.status(402).json({
         success: false,
@@ -3832,6 +4072,9 @@ app.all("/nexus-quota", async (req, res) => {
 app.post("/create-payment", async (req, res) => {
   const decoded = authUser(req, res);
   if (!decoded) return;
+  if (!rateLimitUser("cp:" + decoded.id, 15, 3600000)) {
+    return res.status(429).json({ success: false, message: "Too many payment attempts. Try later." });
+  }
 
   if (!adminSettings.auto_payment_enabled) {
     return res.status(403).json({
@@ -3938,7 +4181,6 @@ app.post("/create-payment", async (req, res) => {
         success: false,
         message: "Payment URL missing from provider response",
         order_id: orderId,
-        raw: data || rawText.slice(0, 300),
       });
     }
 
@@ -4024,6 +4266,9 @@ app.get("/payment-history", (req, res) => {
 app.post("/manual-payment", async (req, res) => {
   const decoded = authUser(req, res);
   if (!decoded) return;
+  if (!rateLimitUser("mp:" + decoded.id, 15, 3600000)) {
+    return res.status(429).json({ success: false, message: "Too many UTR submissions. Try again later." });
+  }
 
   if (!adminSettings.manual_payment_enabled) {
     return res.status(403).json({
@@ -4049,10 +4294,10 @@ app.post("/manual-payment", async (req, res) => {
     .replace(/\s+/g, "")
     .trim()
     .toUpperCase();
-  if (!utr || utr.length < 8 || utr.length > 22) {
+  if (!/^[A-Z0-9]{8,22}$/.test(utr)) {
     return res.status(400).json({
       success: false,
-      message: "Valid UTR required (8–22 chars)",
+      message: "Valid alphanumeric UTR required (8–22 chars)",
     });
   }
 
@@ -4155,19 +4400,6 @@ app.post("/manual-payment", async (req, res) => {
 });
 
 /**
- * Telegram webhook — Approve / Deny (also backed by long-polling)
- */
-app.post("/telegram-webhook", async (req, res) => {
-  res.json({ ok: true });
-  try {
-    const cb = req.body && req.body.callback_query;
-    if (cb) await handleTelegramCallback(cb);
-  } catch (err) {
-    console.error("telegram-webhook:", err.message);
-  }
-});
-
-/**
  * Start manual QR payment session — creates PENDING order (10 min)
  * so history shows Continue even if user closes the sheet.
  * Reuses existing pending order for same user+plan (avoids DB bloat).
@@ -4176,6 +4408,9 @@ app.post("/telegram-webhook", async (req, res) => {
 app.post("/manual-payment/start", (req, res) => {
   const decoded = authUser(req, res);
   if (!decoded) return;
+  if (!rateLimitUser("mps:" + decoded.id, 30, 3600000)) {
+    return res.status(429).json({ success: false, message: "Too many payment sessions started. Try later." });
+  }
 
   if (!adminSettings.manual_payment_enabled) {
     return res.status(403).json({
@@ -4842,14 +5077,17 @@ app.get("/ref-status", async (req, res) => {
 app.post("/rate-submit", async (req, res) => {
   const decoded = authUser(req, res);
   if (!decoded) return;
+  if (!rateLimitUser("rs:" + decoded.id, 5, 3600000)) {
+    return res.status(429).json({ success: false, message: "Too many rating submissions. Try later." });
+  }
   const stars = Math.max(1, Math.min(5, Number((req.body && req.body.stars) || 0) | 0));
   if (!stars) {
     return res.status(400).json({ success: false, message: "stars required" });
   }
-  const name = decoded.name || decoded.email || "User";
+  const name = escTgMd(decoded.name || decoded.email || "User", 80);
   const text =
     `⭐ *App Rating — DRAGO Predictor*\n\n` +
-    `👤 User: ${name} (#${decoded.id})\n` +
+    `👤 User: ${name} (#${escTgMd(decoded.id, 24)})\n` +
     `⭐ Rating: ${"★".repeat(stars)}${"☆".repeat(5 - stars)} (${stars}/5)`;
   const payload = {
     chat_id: TELEGRAM_REPORT_GROUP_ID,
@@ -4868,11 +5106,12 @@ app.post("/win-feedback", async (req, res) => {
   if (!rateLimitUser("wf:" + decoded.id, 5, 3600000))
     return res.status(429).json({ success: false, message: "Too many submissions. Try later." });
   const wins = Math.max(0, Number((req.body && req.body.wins) || 0) | 0);
-  const imageUrl = String((req.body && req.body.image_url) || "").trim().slice(0, 500);
-  const name = decoded.name || decoded.email || "User";
+  const rawImageUrl = String((req.body && req.body.image_url) || "").trim().slice(0, 500);
+  const imageUrl = /^https:\/\/i\.ibb\.co\/[A-Za-z0-9/_.-]+$/i.test(rawImageUrl) ? rawImageUrl : "";
+  const name = escTgMd(decoded.name || decoded.email || "User", 80);
   const caption =
     `🏆 *Win Feedback — DRAGO Predictor*\n\n` +
-    `👤 User: ${name} (#${decoded.id})\n` +
+    `👤 User: ${name} (#${escTgMd(decoded.id, 24)})\n` +
     `🎉 Wins: ${wins}\n` +
     `📝 User ne 20+ wins ke baad feedback bheja hai.`;
   let r = null;
@@ -5031,15 +5270,30 @@ app.get("/order-status", async (req, res) => {
           ? "FAILED"
           : "PENDING";
 
-    if (normalized !== local.payment_status || utr !== local.utr) {
+    // AUDIT-1: Verify upstream amount matches local order amount and never auto-activate REJECTED/EXPIRED orders
+    const upstreamAmt = Number(
+      (data && (data.amount || (data.data && data.data.amount))) || local.amount
+    );
+    const amountMatches =
+      !Number.isFinite(upstreamAmt) || Math.abs(upstreamAmt - Number(local.amount)) < 1;
+    const prevUpper = String(local.payment_status || "").toUpperCase();
+    const canTransitionToSuccess =
+      prevUpper !== "REJECTED" && prevUpper !== "FAILED" && amountMatches;
+
+    const finalStatus =
+      normalized === "SUCCESS" && !canTransitionToSuccess
+        ? local.payment_status
+        : normalized;
+
+    if (finalStatus !== local.payment_status || utr !== local.utr) {
       updateOrderStatus(
         orderId,
-        normalized,
+        finalStatus,
         utr,
         method,
         rawText.slice(0, 1500)
       );
-      if (normalized === "SUCCESS") {
+      if (finalStatus === "SUCCESS" && prevUpper !== "SUCCESS") {
         try {
           await activatePro(local.user_id, local.plan);
         } catch (_) {}
@@ -5051,7 +5305,7 @@ app.get("/order-status", async (req, res) => {
       order_id: orderId,
       amount: local.amount,
       plan: local.plan,
-      payment_status: normalized,
+      payment_status: finalStatus,
       utr,
       method,
     });
@@ -5082,8 +5336,12 @@ app.post("/payment-appeal", async (req, res) => {
   if (!decoded) return;
 
   const orderId = String((req.body && req.body.order_id) || "").trim();
-  const proofUrl = String((req.body && req.body.proof_image_url) || "").trim();
-  if (!orderId || orderId.length < 6) {
+  const rawProofUrl = String((req.body && req.body.proof_image_url) || "").trim();
+  // AUDIT-2: Only allow trusted ImgBB URLs for proof_image_url
+  const proofUrl = /^https:\/\/i\.ibb\.co\/[A-Za-z0-9/_.-]+$/i.test(rawProofUrl)
+    ? rawProofUrl
+    : "";
+  if (!/^[A-Za-z0-9_-]{6,64}$/.test(orderId)) {
     return res.status(400).json({ success: false, message: "Valid Payment ID required" });
   }
 
@@ -5112,13 +5370,13 @@ app.post("/payment-appeal", async (req, res) => {
     : "—";
   const text =
     `⚠️ Payment Not Verified Appeal\n\n` +
-    `👤 Name: ${user.name || "—"}\n` +
-    `📧 Email: ${user.email || "—"}\n` +
-    `🆔 Payment ID: ${order.order_id}\n` +
-    `📦 Plan: ${plan.name || order.plan || "—"}\n` +
+    `👤 Name: ${escTgMd(user.name || "—", 80)}\n` +
+    `📧 Email: ${escTgMd(user.email || "—", 120)}\n` +
+    `🆔 Payment ID: ${escTgMd(order.order_id, 48)}\n` +
+    `📦 Plan: ${escTgMd(plan.name || order.plan || "—", 60)}\n` +
     `💰 Amount: ₹${order.amount != null ? order.amount : "—"}\n` +
-    `📊 Status: ${order.payment_status || "—"}\n` +
-    `🔖 UTR: ${order.utr || "—"}\n` +
+    `📊 Status: ${escTgMd(order.payment_status || "—", 32)}\n` +
+    `🔖 UTR: ${escTgMd(order.utr || "—", 32)}\n` +
     `🕐 Created: ${when} IST\n` +
     `🕐 Appeal: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} IST` +
     (proofUrl ? `\n🖼 Proof: ${proofUrl}` : "");
@@ -5234,7 +5492,14 @@ app.post("/tg/free-sync", async (req, res) => {
   }
 });
 
+const TG_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || TG_FREE_SECRET;
+
 app.post("/tg/webhook", async (req, res) => {
+  // BE-2: Require valid Telegram webhook secret token header
+  const incomingSecret = String(req.get("x-telegram-bot-api-secret-token") || "").trim();
+  if (!incomingSecret || !timingSafeEqualStr(incomingSecret, TG_WEBHOOK_SECRET)) {
+    return res.status(401).json({ ok: false, message: "Unauthorized webhook" });
+  }
   res.json({ ok: true });
   try {
     const cb = req.body && req.body.callback_query;
@@ -5455,11 +5720,16 @@ async function boot() {
     console.log(`   VPS auth: ${VPS_SECRET ? "enabled" : "MISSING — set VPS_SECRET"}`);
     console.log(`   Data store: none on Render (proxy → orihost only)`);
 
-    // Load payments.json + mark stale PENDING → EXPIRED (rows never deleted)
+    // Load payments.json + sync with MongoDB + mark stale PENDING → EXPIRED (BE-7)
     try {
       loadPaymentsFromDisk();
+      syncPaymentsAndSettingsFromMongo()
+        .then(() => {
+          expireStaleOrders();
+          console.log(`   Payments synced (Mongo + disk): ${getPayments().length} record(s)`);
+        })
+        .catch((e) => console.warn("mongo payments sync:", e.message));
       expireStaleOrders();
-      console.log(`   Payments file: ${getPayments().length} record(s)`);
     } catch (e) {
       console.error("startup payments:", e.message);
     }
