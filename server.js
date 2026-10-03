@@ -58,6 +58,18 @@ const RUPAYEX_API_TOKEN = process.env.RUPAYEX_API_TOKEN || "";
 
 /** Plan → amount (INR). Client amount trust mat karo. */
 const PLAN_CATALOG = {
+  weekly: {
+    name: "PRO VIP WEEKLY",
+    amount: 749,
+    days: 7,
+    qr_url: process.env.QR_URL_749 || "",
+  },
+  monthly: {
+    name: "PRO VIP MONTHLY",
+    amount: 1498,
+    days: 30,
+    qr_url: process.env.QR_URL_1498 || "",
+  },
   test: {
     name: "RX1 FOR TEST",
     amount: 300,
@@ -153,6 +165,7 @@ function mapUser(doc) {
     name: doc.name || "",
     picture: doc.picture || "",
     is_pro: doc.is_pro ? 1 : 0,
+    free_active: isFreeActive(doc) ? 1 : 0,
     pro_plan: doc.pro_plan || null,
     pro_expires_at: doc.pro_expires_at || null,
     free_pred_used: Number(doc.free_pred_used) || 0,
@@ -316,6 +329,7 @@ async function dbFindUserByIdLite(id) {
     name: u.name,
     picture: u.picture,
     is_pro: u.is_pro,
+    free_active: isFreeActive(u) ? 1 : 0,
     pro_plan: u.pro_plan,
     pro_expires_at: u.pro_expires_at,
   };
@@ -393,6 +407,15 @@ async function dbSetUserPro(userId, isPro, planKey, expires) {
         pro_expires_at: expires || null,
       },
     }
+  );
+}
+function isFreeActive(u) {
+  return !!(u && u.free_active) && (!u.free_expires_at || Number(u.free_expires_at) > Date.now());
+}
+async function dbSetUserFree(userId, tgId, active, expires) {
+  await col.users.updateOne(
+    { id: Number(userId) },
+    { $set: { free_active: active ? 1 : 0, free_expires_at: expires || null, tg_id: tgId != null ? Number(tgId) : null } }
   );
 }
 async function dbGetFreePredUsed(userId) {
@@ -3587,6 +3610,7 @@ app.get("/prediction-quota", async (req, res) => {
     success: true,
     plan: isPro ? "pro" : "free",
     is_pro: isPro,
+    free_active: isFreeActive(user) ? 1 : 0,
     free_pred_used: isPro ? 0 : freeUsed,
     free_pred_limit: freePredLimit(),
     free_pred_remaining: isPro
@@ -4412,6 +4436,7 @@ app.get("/api-usage", async (req, res) => {
     success: true,
     plan: isPro ? "pro" : "free",
     is_pro: isPro,
+    free_active: isFreeActive(user) ? 1 : 0,
     rate_limit: isPro
       ? { per_minute: API_RATE_LIMIT, window_sec: 60 }
       : {
@@ -4923,7 +4948,69 @@ async function boot() {
     process.exit(1);
   }
 
-  app.listen(PORT, () => {
+  
+/* ── Telegram free-plan verification bot ── */
+const TG_BOT_TOKEN = "8735900669:AAFgHZnkYkxQCW_q1Kbp9uRaGxxvWGeprEs";
+const TG_CHANNEL_ID = "-1002782160527";
+const TG_OWNER_CHAT = "6656009938";
+const TG_CHANNEL_LINK = "https://t.me/+PoqO1JOM5rszNWU9";
+function tgCall(method, payload) {
+  return fetch("https://api.telegram.org/bot" + TG_BOT_TOKEN + "/" + method, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).then((r) => r.json()).catch(() => null);
+}
+function tgMemberStatus(joined) {
+  return joined && joined.result ? String(joined.result.status) : "";
+}
+app.post("/tg/webhook", async (req, res) => {
+  res.json({ ok: true });
+  try {
+    const msg = req.body && req.body.message;
+    if (!msg || !msg.from || !msg.text || msg.text.indexOf("/start") !== 0) return;
+    const token = decodeURIComponent(msg.text.replace("/start", "").trim());
+    let uid = null;
+    try { uid = jwt.verify(token, JWT_SECRET).id; } catch (e) {}
+    if (uid == null) {
+      await tgCall("sendMessage", { chat_id: msg.chat.id, text: "Invalid link. App me login karke dobara Verify par tap karo." });
+      return;
+    }
+    const st = tgMemberStatus(await tgCall("getChatMember", { chat_id: TG_CHANNEL_ID, user_id: msg.from.id }));
+    if (st === "member" || st === "administrator" || st === "creator") {
+      await dbSetUserFree(uid, msg.from.id, true, Date.now() + 30 * 86400000);
+      await tgCall("sendMessage", { chat_id: msg.chat.id, text: "✅ Channel verified! FREE plan 30 din ke liye active ho gaya. Ab app me Prediction/Game kholo." });
+      await tgCall("sendMessage", { chat_id: TG_OWNER_CHAT, text: "🆓 User #" + uid + " (" + (msg.from.username || msg.from.first_name) + ") ne free plan activate kiya." });
+    } else {
+      await tgCall("sendMessage", {
+        chat_id: msg.chat.id,
+        text: "❌ Free plan ke liye pehle channel join karo, phir dobara /start bhejo.",
+        reply_markup: { inline_keyboard: [[{ text: "Channel Join Karo", url: TG_CHANNEL_LINK }]] },
+      });
+    }
+  } catch (e) {
+    console.error("tg/webhook:", e.message);
+  }
+});
+app.get("/free-check", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  try {
+    const u = await col.users.findOne({ id: Number(decoded.id) });
+    if (u && u.tg_id) {
+      const st = tgMemberStatus(await tgCall("getChatMember", { chat_id: TG_CHANNEL_ID, user_id: u.tg_id }));
+      if (st === "member" || st === "administrator" || st === "creator") {
+        if (!isFreeActive(u)) await dbSetUserFree(u.id, u.tg_id, true, Date.now() + 30 * 86400000);
+        return res.json({ success: true, free_active: 1 });
+      }
+    }
+    res.json({ success: true, free_active: u && isFreeActive(u) ? 1 : 0 });
+  } catch (e) {
+    res.json({ success: true, free_active: 0 });
+  }
+});
+
+app.listen(PORT, () => {
     console.log(`🚀 DRAGO on :${PORT}`);
     console.log(`   Frontend: ${FRONTEND_URL}`);
     console.log(`   Allowed domain: ${ALLOWED_WEB_DOMAIN}`);
