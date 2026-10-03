@@ -169,6 +169,8 @@ function mapUser(doc) {
     pro_plan: doc.pro_plan || null,
     pro_expires_at: doc.pro_expires_at || null,
     free_pred_used: Number(doc.free_pred_used) || 0,
+    free_api_used: Number(doc.free_api_used) || 0,
+    free_nexus_used: Number(doc.free_nexus_used) || 0,
     banned: doc.banned ? 1 : 0,
     banned_at: doc.banned_at || null,
     ban_reason: doc.ban_reason || null,
@@ -354,6 +356,8 @@ async function dbInsertUser(googleId, email, name, picture, referredBy) {
     pro_plan: null,
     pro_expires_at: null,
     free_pred_used: 0,
+    free_api_used: 0,
+    free_nexus_used: 0,
     ref_code: await genRefCode(),
     referred_by: referredBy || null,
     ref_count: 0,
@@ -429,6 +433,32 @@ async function dbBumpFreePred(userId) {
   await col.users.updateOne(
     { id: Number(userId) },
     { $inc: { free_pred_used: 1 } }
+  );
+}
+async function dbGetFreeApiUsed(userId) {
+  const u = await col.users.findOne(
+    { id: Number(userId) },
+    { projection: { free_api_used: 1 } }
+  );
+  return Number(u && u.free_api_used) || 0;
+}
+async function dbBumpFreeApi(userId) {
+  await col.users.updateOne(
+    { id: Number(userId) },
+    { $inc: { free_api_used: 1 } }
+  );
+}
+async function dbGetFreeNexusUsed(userId) {
+  const u = await col.users.findOne(
+    { id: Number(userId) },
+    { projection: { free_nexus_used: 1 } }
+  );
+  return Number(u && u.free_nexus_used) || 0;
+}
+async function dbBumpFreeNexus(userId) {
+  await col.users.updateOne(
+    { id: Number(userId) },
+    { $inc: { free_nexus_used: 1 } }
   );
 }
 
@@ -781,6 +811,7 @@ const DEFAULT_ADMIN_SETTINGS = {
   force_winfb: false, // "Feedback in app" ON → 20+ wins wale users ko feedback popup
   free_pred_limit: 3,
   free_api_history_limit: 10,
+  free_nexus_limit: 3,
 };
 let adminSettings = { ...DEFAULT_ADMIN_SETTINGS };
 
@@ -887,9 +918,14 @@ function freeApiHistoryLimit() {
   const n = Number(adminSettings.free_api_history_limit);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 10;
 }
-/** @deprecated use freePredLimit() / freeApiHistoryLimit() */
+function freeNexusLimit() {
+  const n = Number(adminSettings.free_nexus_limit);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 3;
+}
+/** @deprecated use freePredLimit() / freeApiHistoryLimit() / freeNexusLimit() */
 const FREE_PRED_LIMIT = 3;
 const FREE_API_HISTORY_LIMIT = 10;
+const FREE_NEXUS_LIMIT = 3;
 const SERVER_BRAND = "🐉 DRAGO PREDICTOR";
 
 /** Developer API rate limit: 20 requests / minute / user / endpoint */
@@ -996,18 +1032,20 @@ async function requireApiKey(req, res, endpointName) {
     return null;
   }
 
-  // Free: lifetime history quota
+  // Free: lifetime history quota (10 fetches max across lifetime)
+  let freeHistoryHits = 0;
   if (!isPro && endpointName === "history") {
     const totalUsage = usageMap(await dbUsageByUserTotal(row.user_id));
-    const historyHits = Number(totalUsage.history) || 0;
-    if (historyHits >= freeApiHistoryLimit()) {
+    const userDocApiUsed = await dbGetFreeApiUsed(row.user_id);
+    freeHistoryHits = Math.max(userDocApiUsed, Number(totalUsage.history) || 0);
+    if (freeHistoryHits >= freeApiHistoryLimit()) {
       res.status(402).json({
         success: false,
         message:
-          "Free plan limit reached (10 history fetches). Please upgrade to Pro / complete billing.",
+          "Free plan limit reached (10/10 Drago API data fetches). Upgrade to Pro Plan for unlimited API access.",
         billing_required: true,
         plan: "free",
-        used: historyHits,
+        used: freeHistoryHits,
         limit: freeApiHistoryLimit(),
       });
       return null;
@@ -1019,13 +1057,7 @@ async function requireApiKey(req, res, endpointName) {
     : {
         ok: true,
         limit: freeApiHistoryLimit(),
-        remaining: Math.max(
-          0,
-          freeApiHistoryLimit() -
-            (Number(
-              usageMap(await dbUsageByUserTotal(row.user_id)).history
-            ) || 0)
-        ),
+        remaining: Math.max(0, freeApiHistoryLimit() - freeHistoryHits),
         reset_sec: 0,
       };
 
@@ -1054,6 +1086,11 @@ async function requireApiKey(req, res, endpointName) {
   try {
     await dbTouchApiKey(row.id);
   } catch (_) {}
+  if (!isPro && endpointName === "history") {
+    try {
+      await dbBumpFreeApi(row.user_id);
+    } catch (_) {}
+  }
   await recordApiUsage(row.user_id, row.id, endpointName);
   return { row, rate, isPro };
 }
@@ -3420,6 +3457,9 @@ app.get("/profile", async (req, res) => {
   const isPro = userIsPro(user);
   const freeUsed = await dbGetFreePredUsed(user.id);
   const apiTotal = usageMap(await dbUsageByUserTotal(user.id));
+  const userDocApiUsed = await dbGetFreeApiUsed(user.id);
+  const apiHistoryUsed = Math.max(userDocApiUsed, Number(apiTotal.history) || 0);
+  const nexusUsed = await dbGetFreeNexusUsed(user.id);
   res.json({
     success: true,
     user: {
@@ -3446,8 +3486,16 @@ app.get("/profile", async (req, res) => {
       free_pred_remaining: isPro
         ? null
         : Math.max(0, freePredLimit() - freeUsed),
-      api_history_used: Number(apiTotal.history) || 0,
+      api_history_used: apiHistoryUsed,
       api_history_limit: isPro ? null : freeApiHistoryLimit(),
+      api_history_remaining: isPro
+        ? null
+        : Math.max(0, freeApiHistoryLimit() - apiHistoryUsed),
+      free_nexus_used: isPro ? 0 : nexusUsed,
+      free_nexus_limit: freeNexusLimit(),
+      free_nexus_remaining: isPro
+        ? null
+        : Math.max(0, freeNexusLimit() - nexusUsed),
     },
   });
 });
@@ -3500,26 +3548,26 @@ app.get("/wingo30s_prediction", async (req, res) => {
 
   const isPro = userIsPro(user);
   const freeUsed = await dbGetFreePredUsed(decoded.id);
-  const wantConsume = String(req.query.consume || "") === "1";
+  // Free users always consume 1 of their 3 lifetime predictions per reveal
+  const wantConsume = !isPro || String(req.query.consume || "") === "1";
 
   if (!isPro) {
     if (freeUsed >= freePredLimit()) {
       return res.status(402).json({
         success: false,
         message:
-          "Free prediction limit reached. Upgrade to Pro Plan for unlimited predictions.",
+          "Free prediction limit (3/3) complete ho gaya hai. Unlimited predictions ke liye Pro Plan me upgrade karein.",
         billing_required: true,
         plan: "free",
         free_pred_used: freeUsed,
         free_pred_limit: freePredLimit(),
+        free_pred_remaining: 0,
       });
     }
-    if (wantConsume) {
-      try {
-        await dbBumpFreePred(decoded.id);
-      } catch (e) {
-        console.error("free_pred bump:", e.message);
-      }
+    try {
+      await dbBumpFreePred(decoded.id);
+    } catch (e) {
+      console.error("free_pred bump:", e.message);
     }
   }
 
@@ -3608,6 +3656,7 @@ app.get("/prediction-quota", async (req, res) => {
   }
   const isPro = userIsPro(user);
   const freeUsed = await dbGetFreePredUsed(decoded.id);
+  const nexusUsed = await dbGetFreeNexusUsed(decoded.id);
   res.json({
     success: true,
     plan: isPro ? "pro" : "free",
@@ -3618,6 +3667,60 @@ app.get("/prediction-quota", async (req, res) => {
     free_pred_remaining: isPro
       ? null
       : Math.max(0, freePredLimit() - freeUsed),
+    free_nexus_used: isPro ? 0 : nexusUsed,
+    free_nexus_limit: freeNexusLimit(),
+    free_nexus_remaining: isPro
+      ? null
+      : Math.max(0, freeNexusLimit() - nexusUsed),
+  });
+});
+
+/** NEXUS Agent quota check & lifetime 3-use consumer for free users */
+app.all("/nexus-quota", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  const user = await dbFindUserById(decoded.id);
+  if (!user) {
+    return res.status(404).json({ success: false, message: "User not found" });
+  }
+  const isPro = userIsPro(user);
+  const nexusUsed = await dbGetFreeNexusUsed(decoded.id);
+  const limit = freeNexusLimit();
+  const wantConsume =
+    req.method === "POST" || String(req.query.consume || "") === "1";
+
+  if (!isPro) {
+    if (nexusUsed >= limit) {
+      return res.status(402).json({
+        success: false,
+        billing_required: true,
+        plan: "free",
+        is_pro: false,
+        free_nexus_used: nexusUsed,
+        free_nexus_limit: limit,
+        free_nexus_remaining: 0,
+        message:
+          "Free NEXUS Agent limit reached (3/3). Upgrade to Pro Plan for unlimited NEXUS Agent access.",
+      });
+    }
+    if (wantConsume) {
+      try {
+        await dbBumpFreeNexus(decoded.id);
+      } catch (e) {
+        console.error("free_nexus bump:", e.message);
+      }
+    }
+  }
+
+  const newUsed = isPro ? 0 : wantConsume ? nexusUsed + 1 : nexusUsed;
+  res.json({
+    success: true,
+    plan: isPro ? "pro" : "free",
+    is_pro: isPro,
+    free_active: isFreeActive(user) ? 1 : 0,
+    free_nexus_used: newUsed,
+    free_nexus_limit: limit,
+    free_nexus_remaining: isPro ? null : Math.max(0, limit - newUsed),
   });
 });
 
@@ -4430,7 +4533,8 @@ app.get("/api-usage", async (req, res) => {
 
   const user = await dbFindUserById(decoded.id);
   const isPro = userIsPro(user);
-  const historyUsed = Number(total.history) || 0;
+  const userDocApiUsed = await dbGetFreeApiUsed(decoded.id);
+  const historyUsed = Math.max(userDocApiUsed, Number(total.history) || 0);
   const billingRequired =
     !isPro && historyUsed >= freeApiHistoryLimit();
 
@@ -4448,7 +4552,7 @@ app.get("/api-usage", async (req, res) => {
         },
     billing_required: billingRequired,
     billing_message: billingRequired
-      ? "Free plan limit reached. Please complete billing / upgrade to Pro."
+      ? "Free plan limit complete (10/10 Drago API data fetches). Upgrade to Pro Plan for unlimited API access."
       : null,
     today,
     total,
@@ -5017,12 +5121,19 @@ app.post("/tg/webhook", async (req, res) => {
         const freeToken = Buffer.from(payload).toString("base64url") + "." + sig;
         await tgCall("answerCallbackQuery", {
           callback_query_id: cb.id,
-          text: "✅ Account Verified! Free Plan Activated.",
+          text: "✅ Account Verified! Free Trial Activated.",
           show_alert: false,
         });
         await tgCall("sendMessage", {
           chat_id: cb.message.chat.id,
-          text: "✅ Account Verified Successfully!\n\n🎉 Aapka FREE plan 30 din ke liye active ho gaya hai.\n👇 Niche button daba kar seedha app me jao:",
+          text:
+            "✅ Account Verified Successfully!\n\n" +
+            "🎁 Aapka FREE Trial active ho gaya hai:\n" +
+            "• 🔮 3 Free Predictions (Lifetime)\n" +
+            "• 🔌 10 Drago API Data Fetches (Lifetime)\n" +
+            "• 🤖 3 NEXUS Agent Uses (Lifetime)\n\n" +
+            "💎 Unlimited access ke liye Pro Plan me upgrade karein.\n" +
+            "👇 Niche button daba kar seedha app me jao:",
           reply_markup: {
             inline_keyboard: [
               [{ text: "🔮 Open Prediction", url: `${FRONTEND_URL}/prediction/#free=${freeToken}` }],
@@ -5067,7 +5178,14 @@ app.post("/tg/webhook", async (req, res) => {
       const freeToken = Buffer.from(payload).toString("base64url") + "." + sig;
       await tgCall("sendMessage", {
         chat_id: msg.chat.id,
-        text: "✅ Account Verified Successfully!\n\n🎉 Aapka FREE plan 30 din ke liye active ho gaya hai.\n👇 Niche button daba kar seedha app me jao:",
+        text:
+          "✅ Account Verified Successfully!\n\n" +
+          "🎁 Aapka FREE Trial active ho gaya hai:\n" +
+          "• 🔮 3 Free Predictions (Lifetime)\n" +
+          "• 🔌 10 Drago API Data Fetches (Lifetime)\n" +
+          "• 🤖 3 NEXUS Agent Uses (Lifetime)\n\n" +
+          "💎 Unlimited access ke liye Pro Plan me upgrade karein.\n" +
+          "👇 Niche button daba kar seedha app me jao:",
         reply_markup: {
           inline_keyboard: [
             [{ text: "🔮 Open Prediction", url: `${FRONTEND_URL}/prediction/#free=${freeToken}` }],
