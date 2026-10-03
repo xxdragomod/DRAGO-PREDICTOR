@@ -56,37 +56,64 @@ const RUPAYEX_API_BASE = (
 ).replace(/\/$/, "");
 const RUPAYEX_API_TOKEN = process.env.RUPAYEX_API_TOKEN || "";
 
-/** Plan → amount (INR). Client amount trust mat karo. */
+/** Plan → amount (INR). Client amount trust mat karo.
+ * Supports both QR_URL_749 / QR_URL_300 (for ₹749 Weekly) and QR_URL_1498 / QR_URL_900 (for ₹1498 Monthly).
+ */
 const PLAN_CATALOG = {
   weekly: {
     name: "PRO VIP WEEKLY",
     amount: 749,
     days: 7,
-    qr_url: process.env.QR_URL_749 || "",
+    get qr_url() {
+      return (
+        process.env.QR_URL_749 ||
+        process.env.QR_URL_300 ||
+        process.env.QR_URL_500 ||
+        ""
+      );
+    },
   },
   monthly: {
     name: "PRO VIP MONTHLY",
     amount: 1498,
     days: 30,
-    qr_url: process.env.QR_URL_1498 || "",
+    get qr_url() {
+      return process.env.QR_URL_1498 || process.env.QR_URL_900 || "";
+    },
   },
   test: {
-    name: "RX1 FOR TEST",
-    amount: 300,
-    days: 3,
-    qr_url: process.env.QR_URL_300 || "",
+    name: "PRO VIP WEEKLY",
+    amount: 749,
+    days: 7,
+    get qr_url() {
+      return (
+        process.env.QR_URL_749 ||
+        process.env.QR_URL_300 ||
+        process.env.QR_URL_500 ||
+        ""
+      );
+    },
   },
   beginners: {
-    name: "RX1 FOR BEGINNERS",
-    amount: 500,
+    name: "PRO VIP WEEKLY",
+    amount: 749,
     days: 7,
-    qr_url: process.env.QR_URL_500 || "",
+    get qr_url() {
+      return (
+        process.env.QR_URL_749 ||
+        process.env.QR_URL_500 ||
+        process.env.QR_URL_300 ||
+        ""
+      );
+    },
   },
   profit: {
-    name: "RX1 FOR PROFIT",
-    amount: 900,
-    days: 15,
-    qr_url: process.env.QR_URL_900 || "",
+    name: "PRO VIP MONTHLY",
+    amount: 1498,
+    days: 30,
+    get qr_url() {
+      return process.env.QR_URL_1498 || process.env.QR_URL_900 || "";
+    },
   },
 };
 
@@ -166,6 +193,7 @@ function mapUser(doc) {
     picture: doc.picture || "",
     is_pro: doc.is_pro ? 1 : 0,
     free_active: isFreeActive(doc) ? 1 : 0,
+    tg_id: doc.tg_id ? Number(doc.tg_id) : null,
     pro_plan: doc.pro_plan || null,
     pro_expires_at: doc.pro_expires_at || null,
     free_pred_used: Number(doc.free_pred_used) || 0,
@@ -295,6 +323,7 @@ async function connectMongo() {
   await Promise.all([
     safeIndex(col.users, { google_id: 1 }, { unique: true }),
     safeIndex(col.users, { id: 1 }, { unique: true }),
+    safeIndex(col.users, { tg_id: 1 }),
     safeIndex(col.games, { id: 1 }, { unique: true }),
     safeIndex(col.games, { sort_order: 1 }),
     safeIndex(col.api_keys, { key_hash: 1 }, { unique: true, sparse: true }),
@@ -310,6 +339,33 @@ async function connectMongo() {
     // TTL on expire_at Date → auto-purge usage older than ~90 days
     safeIndex(col.api_usage, { expire_at: 1 }, { expireAfterSeconds: 0 }),
   ]);
+  // Deduplicate any historical duplicate tg_id assignments so strictly 1 Telegram account = 1 DRAGO ID
+  try {
+    const withTg = await col.users
+      .find({ tg_id: { $ne: null } })
+      .sort({ id: 1 })
+      .toArray();
+    const seenTg = new Set();
+    const dupUserIds = [];
+    for (const u of withTg) {
+      const t = Number(u.tg_id);
+      if (!t) continue;
+      if (seenTg.has(t)) {
+        dupUserIds.push(u.id);
+      } else {
+        seenTg.add(t);
+      }
+    }
+    if (dupUserIds.length > 0) {
+      await col.users.updateMany(
+        { id: { $in: dupUserIds } },
+        { $set: { free_active: 0, free_expires_at: null, tg_id: null } }
+      );
+      console.log("🔒 Cleaned up duplicate Telegram verifications for user IDs:", dupUserIds);
+    }
+  } catch (e) {
+    console.warn("tg_id dedupe skip:", e.message);
+  }
   console.log("✅ MongoDB connected");
   return db;
 }
@@ -421,6 +477,63 @@ async function dbSetUserFree(userId, tgId, active, expires) {
     { id: Number(userId) },
     { $set: { free_active: active ? 1 : 0, free_expires_at: expires || null, tg_id: tgId != null ? Number(tgId) : null } }
   );
+}
+/**
+ * Strictly enforce 1 Telegram account = 1 DRAGO ID.
+ * If tgId is already claimed by another userId, reject and return owner_id.
+ */
+async function claimTelegramForUser(userId, tgId, expires) {
+  const uidNum = Number(userId);
+  const tgNum = Number(tgId);
+  if (!uidNum || !tgNum) {
+    return { ok: false, reason: "invalid_params" };
+  }
+
+  const matches = await col.users
+    .find({ tg_id: tgNum })
+    .sort({ id: 1 })
+    .toArray();
+
+  if (matches.length > 0) {
+    const primaryOwner = matches[0];
+    if (matches.length > 1) {
+      const dupIds = matches.slice(1).map((u) => u.id);
+      await col.users.updateMany(
+        { id: { $in: dupIds } },
+        { $set: { free_active: 0, free_expires_at: null, tg_id: null } }
+      );
+    }
+    if (Number(primaryOwner.id) !== uidNum) {
+      return {
+        ok: false,
+        reason: "tg_already_used",
+        owner_id: primaryOwner.id,
+      };
+    }
+  }
+
+  const currentUser = await col.users.findOne({ id: uidNum });
+  if (!currentUser) {
+    return { ok: false, reason: "user_not_found" };
+  }
+  if (currentUser.tg_id && Number(currentUser.tg_id) !== tgNum) {
+    return {
+      ok: false,
+      reason: "user_has_other_tg",
+    };
+  }
+
+  await col.users.updateOne(
+    { id: uidNum },
+    {
+      $set: {
+        free_active: 1,
+        free_expires_at: expires || null,
+        tg_id: tgNum,
+      },
+    }
+  );
+  return { ok: true, owner_id: uidNum };
 }
 async function dbGetFreePredUsed(userId) {
   const u = await col.users.findOne(
@@ -1007,17 +1120,17 @@ async function requireApiKey(req, res, endpointName) {
   const user = await dbFindUserById(row.user_id);
   const isPro = userIsPro(user);
 
-  // History: free + any pro. Prediction API: ONLY RX1 FOR PROFIT (₹900)
+  // History: free + any pro. Prediction API: any active Pro plan (Weekly ₹749 / Monthly ₹1498)
   if (endpointName === "prediction") {
     const planKey = user && user.pro_plan ? String(user.pro_plan) : "";
-    if (!isPro || planKey !== "profit") {
+    if (!isPro) {
       res.status(403).json({
         success: false,
         message:
-          "Prediction API is available only on RX1 FOR PROFIT (₹900) plan. Upgrade to access.",
+          "Prediction API is available only on Pro VIP plans (₹749 Weekly / ₹1,498 Monthly). Upgrade to access.",
         billing_required: true,
-        plan: planKey || (isPro ? "pro" : "free"),
-        required_plan: "profit",
+        plan: planKey || "free",
+        required_plan: "weekly",
       });
       return null;
     }
@@ -1224,15 +1337,15 @@ function findPendingManual(userId, planKey) {
   const cutoff = Date.now() - PAYMENT_TTL_MS;
   return (
     getPayments()
-      .filter(
-        (o) =>
-          o &&
-          Number(o.user_id) === uid &&
-          String(o.plan) === plan &&
-          String(o.payment_status || "").toUpperCase() === "PENDING" &&
-          String(o.method || "") === "UPI_MANUAL" &&
-          Date.parse(o.created_at || 0) >= cutoff
-      )
+      .filter((o) => {
+        if (!o || Number(o.user_id) !== uid || String(o.plan) !== plan) return false;
+        if (String(o.method || "") !== "UPI_MANUAL") return false;
+        const st = String(o.payment_status || "").toUpperCase();
+        if (st === "PENDING_VERIFY") {
+          return Date.parse(o.created_at || 0) >= Date.now() - 30 * 60 * 1000;
+        }
+        return st === "PENDING" && Date.parse(o.created_at || 0) >= cutoff;
+      })
       .sort(
         (a, b) =>
           Date.parse(b.created_at || 0) - Date.parse(a.created_at || 0)
@@ -1474,7 +1587,8 @@ async function notifyAdminManualPayment({ orderId, user, planKey, amount, utr })
     `🧾 *New manual payment*\n\n` +
     `👤 Name: ${user.name || "—"}\n` +
     `📧 Email: ${user.email || "—"}\n` +
-    `📦 Plan: ${plan ? plan.name : planKey}\n` +
+    `🆔 User ID: #${user.id || "—"}\n` +
+    `📦 Plan: ${plan ? `${plan.name} (${plan.days} Days)` : planKey}\n` +
     `💰 Amount: ₹${amount}\n` +
     `🔖 UTR: \`${utr}\`\n` +
     `🆔 Order: \`${orderId}\`\n` +
@@ -2589,9 +2703,8 @@ async function userDocMenuPayload(uid) {
     (ban.banned ? "⛔ BANNED" : "✅ Not banned");
   const keyboard = [
     [
-      { text: "🥉 ₹300 · 3d", callback_data: "up:" + u.id + ":test" },
-      { text: "🥈 ₹500 · 7d", callback_data: "up:" + u.id + ":beginners" },
-      { text: "🥇 ₹900 · 15d", callback_data: "up:" + u.id + ":profit" },
+      { text: "⚡ Weekly ₹749 · 7d", callback_data: "up:" + u.id + ":weekly" },
+      { text: "👑 Monthly ₹1498 · 30d", callback_data: "up:" + u.id + ":monthly" },
     ],
     [{ text: "❌ Pro band karo", callback_data: "up:" + u.id + ":none" }],
     [
@@ -4026,7 +4139,7 @@ app.post("/manual-payment", async (req, res) => {
 
     notifyAdminManualPayment({
       orderId,
-      user: { name: user.name, email: user.email },
+      user: { id: user.id, name: user.name, email: user.email },
       planKey,
       amount,
       utr,
@@ -4104,10 +4217,13 @@ app.post("/manual-payment/start", (req, res) => {
         order_id: existing.order_id,
         plan: planKey,
         amount: plan.amount,
+        days: plan.days,
         qr_url: plan.qr_url || null,
         name: plan.name,
-        ttl_minutes: 10, upi_id: UPI_ID,
-        payment_status: "PENDING",
+        ttl_minutes: 10,
+        upi_id: UPI_ID,
+        payment_status: existing.payment_status || "PENDING",
+        utr: existing.utr || null,
         reused: true,
       });
     }
@@ -4132,9 +4248,11 @@ app.post("/manual-payment/start", (req, res) => {
       order_id: orderId,
       plan: planKey,
       amount: plan.amount,
+      days: plan.days,
       qr_url: plan.qr_url || null,
       name: plan.name,
-      ttl_minutes: 10, upi_id: UPI_ID,
+      ttl_minutes: 10,
+      upi_id: UPI_ID,
       payment_status: "PENDING",
     });
   } catch (err) {
@@ -4839,13 +4957,19 @@ app.get("/order-status", async (req, res) => {
     });
   }
 
-  if (!RUPAYEX_API_TOKEN) {
+  if (
+    !RUPAYEX_API_TOKEN ||
+    local.method === "UPI_MANUAL" ||
+    orderId.startsWith("MANUAL")
+  ) {
     return res.json({
       success: true,
       order_id: orderId,
       amount: local.amount,
       plan: local.plan,
       payment_status: local.payment_status,
+      utr: local.utr || null,
+      method: local.method || null,
     });
   }
 
@@ -5081,19 +5205,22 @@ app.post("/tg/free-sync", async (req, res) => {
   try {
     const { uid, tg_id, exp, sig } = req.body || {};
     if (!uid || !tg_id || !exp || !sig) {
-      return res.status(400).json({ ok: false });
+      return res.status(400).json({ ok: false, reason: "missing_params" });
     }
     const expected = crypto
       .createHmac("sha256", TG_FREE_SECRET)
       .update(`${uid}.${tg_id}.${exp}`)
       .digest("hex");
     if (String(sig) !== expected) {
-      return res.status(403).json({ ok: false });
+      return res.status(403).json({ ok: false, reason: "invalid_sig" });
     }
-    await dbSetUserFree(Number(uid), Number(tg_id), true, Number(exp));
-    return res.json({ ok: true });
+    const claim = await claimTelegramForUser(Number(uid), Number(tg_id), Number(exp));
+    if (!claim.ok) {
+      return res.status(409).json(claim);
+    }
+    return res.json({ ok: true, owner_id: claim.owner_id });
   } catch (e) {
-    return res.status(500).json({ ok: false });
+    return res.status(500).json({ ok: false, reason: "server_error" });
   }
 });
 
@@ -5115,7 +5242,28 @@ app.post("/tg/webhook", async (req, res) => {
       const st = tgMemberStatus(await tgCall("getChatMember", { chat_id: TG_CHANNEL_ID, user_id: cb.from.id }));
       if (st === "member" || st === "administrator" || st === "creator") {
         const exp = Date.now() + 30 * 86400000;
-        await dbSetUserFree(uid, cb.from.id, true, exp);
+        const claim = await claimTelegramForUser(uid, cb.from.id, exp);
+        if (!claim.ok) {
+          await tgCall("answerCallbackQuery", {
+            callback_query_id: cb.id,
+            text: "❌ 1 Telegram account se sirf 1 hi DRAGO ID verify ho sakti hai!",
+            show_alert: true,
+          });
+          await tgCall("sendMessage", {
+            chat_id: cb.message.chat.id,
+            text:
+              "❌ Verification Blocked!\n\n" +
+              (claim.reason === "tg_already_used"
+                ? `⚠️ Ye Telegram account pehle se hi DRAGO Account #${claim.owner_id} ke saath linked hai.\n\n🔒 Rule: 1 Telegram account se sirf 1 hi DRAGO ID verify ho sakti hai.\nApne pehle wale DRAGO account me login karein ya Unlimited Access ke liye Pro VIP Plan lein.`
+                : "⚠️ Ye DRAGO account pehle se kisi dusre Telegram account se linked hai."),
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "🚀 Open DRAGO App", url: `${FRONTEND_URL}/dashboard/` }],
+              ],
+            },
+          });
+          return;
+        }
         const payload = `${uid}.${cb.from.id}.${exp}`;
         const sig = crypto.createHmac("sha256", TG_FREE_SECRET).update(payload).digest("hex");
         const freeToken = Buffer.from(payload).toString("base64url") + "." + sig;
@@ -5172,7 +5320,23 @@ app.post("/tg/webhook", async (req, res) => {
     const st = tgMemberStatus(await tgCall("getChatMember", { chat_id: TG_CHANNEL_ID, user_id: msg.from.id }));
     if (st === "member" || st === "administrator" || st === "creator") {
       const exp = Date.now() + 30 * 86400000;
-      await dbSetUserFree(uid, msg.from.id, true, exp);
+      const claim = await claimTelegramForUser(uid, msg.from.id, exp);
+      if (!claim.ok) {
+        await tgCall("sendMessage", {
+          chat_id: msg.chat.id,
+          text:
+            "❌ Verification Blocked!\n\n" +
+            (claim.reason === "tg_already_used"
+              ? `⚠️ Ye Telegram account pehle se hi DRAGO Account #${claim.owner_id} ke saath linked hai.\n\n🔒 Rule: 1 Telegram account se sirf 1 hi DRAGO ID verify ho sakti hai.\nApne pehle wale DRAGO account me login karein ya Unlimited Access ke liye Pro VIP Plan lein.`
+              : "⚠️ Ye DRAGO account pehle se kisi dusre Telegram account se linked hai."),
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🚀 Open DRAGO App", url: `${FRONTEND_URL}/dashboard/` }],
+            ],
+          },
+        });
+        return;
+      }
       const payload = `${uid}.${msg.from.id}.${exp}`;
       const sig = crypto.createHmac("sha256", TG_FREE_SECRET).update(payload).digest("hex");
       const freeToken = Buffer.from(payload).toString("base64url") + "." + sig;
@@ -5220,10 +5384,21 @@ app.get("/free-check", async (req, res) => {
   try {
     const u = await col.users.findOne({ id: Number(decoded.id) });
     if (u && u.tg_id) {
+      const exp =
+        u.free_expires_at && Number(u.free_expires_at) > Date.now()
+          ? Number(u.free_expires_at)
+          : Date.now() + 30 * 86400000;
+      const claim = await claimTelegramForUser(u.id, u.tg_id, exp);
+      if (!claim.ok) {
+        return res.json({
+          success: true,
+          free_active: 0,
+          tg_already_used: true,
+          owner_id: claim.owner_id || null,
+        });
+      }
       const st = tgMemberStatus(await tgCall("getChatMember", { chat_id: TG_CHANNEL_ID, user_id: u.tg_id }));
       if (st === "member" || st === "administrator" || st === "creator") {
-        const exp = u.free_expires_at && Number(u.free_expires_at) > Date.now() ? Number(u.free_expires_at) : Date.now() + 30 * 86400000;
-        if (!isFreeActive(u)) await dbSetUserFree(u.id, u.tg_id, true, exp);
         const payload = `${u.id}.${u.tg_id}.${exp}`;
         const sig = crypto.createHmac("sha256", TG_FREE_SECRET).update(payload).digest("hex");
         const freeToken = Buffer.from(payload).toString("base64url") + "." + sig;
