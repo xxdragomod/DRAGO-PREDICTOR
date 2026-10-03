@@ -4002,6 +4002,9 @@ app.get("/payment-history", (req, res) => {
     return {
       order_id: row.order_id,
       plan: row.plan,
+      plan_name:
+        (PLAN_CATALOG[row.plan] && PLAN_CATALOG[row.plan].name) ||
+        String(row.plan || "PRO VIP").toUpperCase(),
       amount: row.amount,
       payment_status: row.payment_status,
       utr: row.utr || null,
@@ -4212,6 +4215,12 @@ app.post("/manual-payment/start", (req, res) => {
     // Reuse open manual session instead of inserting a new row every open
     const existing = findPendingManual(decoded.id, planKey);
     if (existing) {
+      const createdMs = Date.parse(existing.created_at || 0) || Date.now();
+      const expiresAtMs = createdMs + PAYMENT_TTL_MS;
+      const expiresInSec = Math.max(
+        0,
+        Math.floor((expiresAtMs - Date.now()) / 1000)
+      );
       return res.json({
         success: true,
         order_id: existing.order_id,
@@ -4221,6 +4230,9 @@ app.post("/manual-payment/start", (req, res) => {
         qr_url: plan.qr_url || null,
         name: plan.name,
         ttl_minutes: 10,
+        created_at: existing.created_at,
+        expires_at: new Date(expiresAtMs).toISOString(),
+        expires_in_sec: expiresInSec,
         upi_id: UPI_ID,
         payment_status: existing.payment_status || "PENDING",
         utr: existing.utr || null,
@@ -4230,6 +4242,8 @@ app.post("/manual-payment/start", (req, res) => {
 
     const orderId = `MANUAL${Date.now()}${crypto.randomBytes(3).toString("hex")}`;
     const meta = JSON.stringify({ source: "manual_qr", stage: "awaiting_utr" });
+    const nowMs = Date.now();
+    const expiresAtMs = nowMs + PAYMENT_TTL_MS;
 
     insertOrder({
       order_id: orderId,
@@ -4252,6 +4266,9 @@ app.post("/manual-payment/start", (req, res) => {
       qr_url: plan.qr_url || null,
       name: plan.name,
       ttl_minutes: 10,
+      created_at: new Date(nowMs).toISOString(),
+      expires_at: new Date(expiresAtMs).toISOString(),
+      expires_in_sec: Math.floor(PAYMENT_TTL_MS / 1000),
       upi_id: UPI_ID,
       payment_status: "PENDING",
     });
