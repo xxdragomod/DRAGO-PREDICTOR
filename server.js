@@ -526,32 +526,112 @@ async function dbInsertUser(googleId, email, name, picture, referredBy) {
   await col.users.insertOne(doc);
   return mapUser(doc);
 }
-/** Referrer count badhao; 10 complete → ₹300 plan free (ek baar) */
+/** Referrer joined count badhao (freeplan reward tabhi milega jab 2 referred users VIP plan buy karenge) */
 async function bumpReferrer(code) {
   try {
-    const referrer = await col.users.findOne({ ref_code: code });
+    if (!code || !col.users) return;
+    const referrer = await col.users.findOne({ ref_code: String(code).trim() });
     if (!referrer) return;
-    await col.users.updateOne({ ref_code: code }, { $inc: { ref_count: 1 } });
-    const newCount = (referrer.ref_count || 0) + 1;
-    if (newCount >= 10 && !referrer.ref_rewarded) {
+    await col.users.updateOne(
+      { ref_code: String(code).trim() },
+      { $inc: { ref_count: 1 } }
+    );
+  } catch (e) {
+    console.warn("bumpReferrer:", e.message);
+  }
+}
+
+/**
+ * Jab kisi referred user ka VIP plan activate ho (paid weekly/monthly),
+ * referrer ke paid referrals check karo:
+ * - Har 2 Weekly Paid Referrals par referrer ko 1 Weekly VIP Plan (7 Days) FREE milega!
+ * - Har 2 Monthly Paid Referrals par referrer ko 1 Monthly VIP Plan (30 Days) FREE milega!
+ */
+async function creditReferrerOnPaidPlan(refCode, purchasedPlanKey, buyerUser) {
+  try {
+    if (!refCode || !col.users) return;
+    const cleanCode = String(refCode).trim();
+    const referrer = await col.users.findOne({ ref_code: cleanCode });
+    if (!referrer) return;
+    if (buyerUser && Number(referrer.id) === Number(buyerUser.id)) return;
+
+    const pKey = String(purchasedPlanKey || "weekly").toLowerCase();
+    const isMonthly = pKey === "monthly" || pKey === "profit";
+
+    const incFields = {
+      ref_paid_count: 1,
+      ...(isMonthly ? { ref_paid_monthly: 1 } : { ref_paid_weekly: 1 }),
+    };
+    await col.users.updateOne({ id: referrer.id }, { $inc: incFields });
+
+    const freshRef = await col.users.findOne({ id: referrer.id });
+    if (!freshRef) return;
+
+    const totalPaid = Number(freshRef.ref_paid_count) || 0;
+    const paidMonthly = Number(freshRef.ref_paid_monthly) || 0;
+    const rewardedPairs = Number(freshRef.ref_rewarded_pairs) || 0;
+    const rewardedMonthlyUsed = Number(freshRef.ref_rewarded_monthly_used) || 0;
+
+    const unrewardedTotal = totalPaid - rewardedPairs * 2;
+    const unrewardedMonthly = paidMonthly - rewardedMonthlyUsed;
+
+    if (unrewardedTotal >= 2) {
+      const giveMonthly = unrewardedMonthly >= 2;
+      const rewardPlanKey = giveMonthly ? "monthly" : "weekly";
+      const rewardDays = giveMonthly
+        ? (PLAN_CATALOG.monthly && PLAN_CATALOG.monthly.days) || 30
+        : (PLAN_CATALOG.weekly && PLAN_CATALOG.weekly.days) || 7;
+      const rewardLabel = giveMonthly ? "Monthly VIP Plan (30 Days)" : "Weekly VIP Plan (7 Days)";
+
       const upd = await col.users.updateOne(
-        { ref_code: code, ref_rewarded: { $ne: true } },
-        { $set: { ref_rewarded: true } }
+        { id: freshRef.id, ref_rewarded_pairs: rewardedPairs },
+        {
+          $inc: {
+            ref_rewarded_pairs: 1,
+            ref_rewards_earned: 1,
+            ...(giveMonthly ? { ref_rewarded_monthly_used: 2 } : {}),
+          },
+          $set: { ref_rewarded: true },
+        }
       );
-      if (upd && upd.modifiedCount) {
-        await activatePro(referrer.id, "test");
+
+      if (upd && (upd.modifiedCount || upd.matchedCount)) {
+        const nowMs = Date.now();
+        const curExpMs =
+          freshRef.is_pro && freshRef.pro_expires_at
+            ? new Date(freshRef.pro_expires_at).getTime()
+            : 0;
+        const baseMs = curExpMs > nowMs ? curExpMs : nowMs;
+        const newExpires = new Date(baseMs + rewardDays * 86400000).toISOString();
+
+        await dbSetUserPro(freshRef.id, 1, rewardPlanKey, newExpires, {
+          isReferralReward: true,
+        });
+
+        pushNotification({
+          target: "user",
+          user_id: freshRef.id,
+          user_name: freshRef.name || "VIP Member",
+          type: "plan_active",
+          title: `🎁 Free ${rewardLabel} Unlocked!`,
+          message: `Congratulations ${freshRef.name || "Partner"}! 2 of your referred friends purchased a VIP Plan. Your FREE ${rewardLabel} is now ACTIVE till ${formatIstDateShort(newExpires)}!`,
+          image_url: null,
+          action_url: "/prediction/",
+          action_label: "OPEN PREDICTION →",
+        });
+
         groupNotify(
-          "🎁 *REFERRAL REWARD UNLOCKED*\n\n" +
-            "👤 Name: " + (referrer.name || "User") + "\n" +
-            "🆔 ID: #" + referrer.id + "\n" +
-            "🏆 10 referrals complete — ₹300 plan FREE activate ho gaya\n" +
+          "🎁 *REFERRAL VIP REWARD UNLOCKED*\n\n" +
+            "👤 Referrer: " + (freshRef.name || "User") + " (#" + freshRef.id + ")\n" +
+            "👥 Paid Referrals: " + totalPaid + " (" + (giveMonthly ? "2 Monthly Paid" : "2 Weekly Paid") + ")\n" +
+            "🏆 Free Reward: " + rewardLabel + " Activated FREE\n" +
             "🕒 Time: " + istTimeStr(),
           true
         );
       }
     }
   } catch (e) {
-    console.warn("bumpReferrer:", e.message);
+    console.warn("creditReferrerOnPaidPlan:", e.message);
   }
 }
 async function dbUpdateUserProfile(googleId, name, picture) {
@@ -560,12 +640,26 @@ async function dbUpdateUserProfile(googleId, name, picture) {
     { $set: { name: name || "", picture: picture || "" } }
   );
 }
-async function dbSetUserPro(userId, isPro, planKey, expires) {
+async function dbSetUserPro(userId, isPro, planKey, expires, opts = {}) {
   const uid = Number(userId);
   let prevUser = null;
   try {
     if (col.users) prevUser = await col.users.findOne({ id: uid });
   } catch (_) {}
+
+  const extraSet = {};
+  const isFirstPaidPurchase =
+    Boolean(isPro) &&
+    !opts.isReferralReward &&
+    prevUser &&
+    prevUser.referred_by &&
+    !prevUser.ref_plan_purchased;
+
+  if (isFirstPaidPurchase) {
+    extraSet.ref_plan_purchased = true;
+    extraSet.ref_plan_type = String(planKey || "weekly").toLowerCase();
+    extraSet.ref_plan_purchased_at = new Date().toISOString();
+  }
 
   await col.users.updateOne(
     { id: uid },
@@ -575,9 +669,14 @@ async function dbSetUserPro(userId, isPro, planKey, expires) {
         pro_plan: planKey || null,
         pro_expires_at: expires || null,
         ...(isPro ? { pro_expired_notified_for: null } : {}),
+        ...extraSet,
       },
     }
   );
+
+  if (isFirstPaidPurchase && prevUser && prevUser.referred_by) {
+    await creditReferrerOnPaidPlan(prevUser.referred_by, planKey, prevUser);
+  }
 
   try {
     const userName = (prevUser && (prevUser.name || prevUser.email)) || "VIP Member";
@@ -5538,27 +5637,130 @@ app.get("/announcement", (req, res) => {
   res.json(announcement ? { success: true, announcement } : { success: true, announcement: null });
 });
 
-/** Referral status — code, count, link (JWT required) */
+/** Referral status — code, joined_count, paid_count, rewards_earned, referrals list, link (JWT required) */
 app.get("/ref-status", async (req, res) => {
   const decoded = authUser(req, res);
   if (!decoded) return;
   try {
-    const u = await col.users.findOne({ id: Number(decoded.id) });
+    let u = await col.users.findOne({ id: Number(decoded.id) });
     if (!u) return res.status(404).json({ success: false, message: "user not found" });
     if (!u.ref_code) {
       const c = await genRefCode();
       await col.users.updateOne({ id: u.id }, { $set: { ref_code: c } });
       u.ref_code = c;
     }
+
+    let referredDocs = [];
+    try {
+      const allUsers = await col.users.find({ referred_by: u.ref_code }).toArray();
+      referredDocs = Array.isArray(allUsers) ? allUsers : [];
+    } catch (_) {}
+
+    let paidWeekly = 0;
+    let paidMonthly = 0;
+    const referralsList = referredDocs
+      .map((r) => {
+        const bought = Boolean(r.ref_plan_purchased || r.is_pro);
+        const pType = String(r.ref_plan_type || r.pro_plan || "").toLowerCase();
+        const isMon = pType === "monthly" || pType === "profit";
+        if (bought) {
+          if (isMon) paidMonthly++;
+          else paidWeekly++;
+        }
+        return {
+          id: r.id,
+          name: r.name || "DRAGO User",
+          created_at: r.created_at || null,
+          plan_bought: bought,
+          plan_type: bought ? (isMon ? "MONTHLY VIP" : "WEEKLY VIP") : "FREE",
+        };
+      })
+      .sort((a, b) => Number(b.plan_bought) - Number(a.plan_bought) || (b.id - a.id));
+
+    const joinedCount = Math.max(Number(u.ref_count) || 0, referredDocs.length);
+    const paidCount = Math.max(Number(u.ref_paid_count) || 0, paidWeekly + paidMonthly);
+    const rewardedPairs = Number(u.ref_rewarded_pairs) || 0;
+
+    // Auto-unlock if 2+ paid referrals exist and reward hasn't been granted yet
+    if (paidCount - rewardedPairs * 2 >= 2) {
+      await col.users.updateOne(
+        { id: u.id },
+        {
+          $set: {
+            ref_count: joinedCount,
+            ref_paid_count: paidCount - 1,
+            ref_paid_weekly: Math.max(0, paidWeekly - (paidMonthly >= 2 ? 0 : 1)),
+            ref_paid_monthly: Math.max(0, paidMonthly - (paidMonthly >= 2 ? 1 : 0)),
+          },
+        }
+      );
+      await creditReferrerOnPaidPlan(
+        u.ref_code,
+        paidMonthly >= 2 ? "monthly" : "weekly",
+        null
+      );
+      u = (await col.users.findOne({ id: u.id })) || u;
+    }
+
+    const finalRewards = Number(u.ref_rewards_earned) || Number(u.ref_rewarded_pairs) || 0;
+    const progressCurrent = paidCount % 2;
+
     res.json({
       success: true,
       code: u.ref_code,
-      count: u.ref_count || 0,
-      rewarded: !!u.ref_rewarded,
+      joined_count: joinedCount,
+      count: paidCount,
+      paid_count: paidCount,
+      paid_weekly_count: Math.max(Number(u.ref_paid_weekly) || 0, paidWeekly),
+      paid_monthly_count: Math.max(Number(u.ref_paid_monthly) || 0, paidMonthly),
+      progress_current: progressCurrent,
+      progress_target: 2,
+      rewards_earned: finalRewards,
+      rewarded: finalRewards > 0 || !!u.ref_rewarded,
+      referred_by: u.referred_by || null,
+      weekly_plan_price: (PLAN_CATALOG.weekly && PLAN_CATALOG.weekly.amount) || 749,
+      monthly_plan_price: (PLAN_CATALOG.monthly && PLAN_CATALOG.monthly.amount) || 1498,
       link: FRONTEND_URL + "/?ref=" + u.ref_code,
+      referrals: referralsList.slice(0, 50),
     });
   } catch (e) {
     res.status(500).json({ success: false, message: "server error" });
+  }
+});
+
+/** Apply referral code manually (once per user, cannot refer self) */
+app.post("/ref-apply", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  try {
+    const rawCode = String((req.body && req.body.code) || "")
+      .trim()
+      .toLowerCase();
+    if (!rawCode) {
+      return res.status(400).json({ success: false, message: "Enter a valid referral code." });
+    }
+    const u = await col.users.findOne({ id: Number(decoded.id) });
+    if (!u) return res.status(404).json({ success: false, message: "User not found." });
+    if (u.referred_by) {
+      return res.status(400).json({ success: false, message: "Referral code already applied on your account." });
+    }
+    if (String(u.ref_code || "").toLowerCase() === rawCode) {
+      return res.status(400).json({ success: false, message: "You cannot apply your own referral code." });
+    }
+    const referrer = await col.users.findOne({ ref_code: rawCode });
+    if (!referrer || Number(referrer.id) === Number(u.id)) {
+      return res.status(404).json({ success: false, message: "Invalid referral code." });
+    }
+    await col.users.updateOne({ id: u.id }, { $set: { referred_by: referrer.ref_code } });
+    await bumpReferrer(referrer.ref_code);
+    res.json({
+      success: true,
+      referred_by: referrer.ref_code,
+      referrer_name: referrer.name || "Friend",
+      message: `Referral code applied! Linked to ${referrer.name || "your friend"}.`,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: "Failed to apply referral code." });
   }
 });
 
@@ -6445,6 +6647,11 @@ app.get("/admin/users", async (req, res) => {
         ban_state: u.ban_state || (u.banned ? "banned" : "ok"),
         ban_reason: u.ban_reason || "",
         banned_device: u.banned_device || "",
+        ref_code: u.ref_code || "",
+        ref_count: Number(u.ref_count) || 0,
+        ref_paid_count: Number(u.ref_paid_count) || 0,
+        ref_rewards_earned: Number(u.ref_rewards_earned) || 0,
+        referred_by: u.referred_by || null,
       });
       if (mapped.length >= limit) break;
     }
