@@ -15,6 +15,12 @@ const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
 const { MongoClient, ObjectId } = require("mongodb");
+let webPush = null;
+try {
+  webPush = require("web-push");
+} catch (_) {
+  webPush = null;
+}
 
 // ─── Env ( .env  +  env  dono support ) ─────────────────────────────────────
 dotenv.config({ path: path.join(__dirname, ".env") });
@@ -1253,6 +1259,130 @@ function getActiveBanners() {
   return DEFAULT_ADMIN_SETTINGS.banners;
 }
 
+/* ── Web Push Notification Engine (VAPID + MongoDB/Local Store) ── */
+const VAPID_PUBLIC_KEY =
+  process.env.VAPID_PUBLIC_KEY ||
+  "BOigTrhQmM5ZIPrxLgCVHGEM2ZwGNGQtySp_cakApWg8QLxAzsKCrmnWDZdqfMaE-FabnyFWstfsLbp2DL-ekKc";
+const VAPID_PRIVATE_KEY =
+  process.env.VAPID_PRIVATE_KEY ||
+  "Pc_D3kszKNNnGjQq7w3cTBdLGqw_04GngCOORjwEDFw";
+
+if (webPush && VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  try {
+    webPush.setVapidDetails(
+      "mailto:support@dragopredictor.vercel.app",
+      VAPID_PUBLIC_KEY,
+      VAPID_PRIVATE_KEY
+    );
+  } catch (e) {
+    console.warn("webPush.setVapidDetails:", e.message);
+  }
+}
+
+const PUSH_SUBS_PATH = path.join(__dirname, "push_subs.json");
+let pushSubscriptionsList = [];
+try {
+  if (fs.existsSync(PUSH_SUBS_PATH)) {
+    const parsed = JSON.parse(fs.readFileSync(PUSH_SUBS_PATH, "utf8"));
+    if (Array.isArray(parsed)) pushSubscriptionsList = parsed;
+  }
+} catch (_) {
+  pushSubscriptionsList = [];
+}
+
+function savePushSubscriptionsStore() {
+  try {
+    fs.writeFileSync(
+      PUSH_SUBS_PATH,
+      JSON.stringify(pushSubscriptionsList.slice(0, 3000), null, 2),
+      "utf8"
+    );
+  } catch (_) {}
+  if (col.kv_store) {
+    col.kv_store
+      .updateOne(
+        { _id: "push_subs_v1" },
+        {
+          $set: {
+            value: pushSubscriptionsList.slice(0, 3000),
+            updated_at: new Date().toISOString(),
+          },
+        },
+        { upsert: true }
+      )
+      .catch((err) => console.warn("mongo push_subs save:", err.message));
+  }
+}
+
+function isUserPushSubscribed(userId) {
+  const uid = Number(userId);
+  if (!uid) return false;
+  return pushSubscriptionsList.some((s) => s && Number(s.user_id) === uid && s.endpoint);
+}
+
+async function dispatchWebPush(item) {
+  if (!webPush || !item) return { attempted: 0, delivered: 0, failed: 0 };
+  const target = item.target === "all" ? "all" : "user";
+  const targetUid = Number(item.user_id) || null;
+  const targets = pushSubscriptionsList.filter((s) => {
+    if (!s || !s.endpoint || !s.keys) return false;
+    if (target === "all") return true;
+    return targetUid && Number(s.user_id) === targetUid;
+  });
+
+  if (!targets.length) {
+    return { attempted: 0, delivered: 0, failed: 0 };
+  }
+
+  const payload = JSON.stringify({
+    id: item.id,
+    title: item.title || "DRAGO Predictor",
+    body: item.message || "",
+    image: item.image_url || null,
+    icon: `${FRONTEND_URL}/favicon-192.png`,
+    badge: `${FRONTEND_URL}/favicon-192.png`,
+    url: item.action_url || "/notifications/",
+    action_label: item.action_label || "Open App",
+    type: item.type || "broadcast",
+    created_at: item.created_at || new Date().toISOString(),
+  });
+
+  let delivered = 0;
+  let failed = 0;
+  const deadEndpoints = new Set();
+
+  await Promise.all(
+    targets.map(async (subRecord) => {
+      try {
+        await webPush.sendNotification(
+          {
+            endpoint: subRecord.endpoint,
+            keys: subRecord.keys,
+          },
+          payload,
+          { TTL: 86400, urgency: "high" }
+        );
+        delivered++;
+      } catch (err) {
+        failed++;
+        const status = Number(err && err.statusCode);
+        if (status === 404 || status === 410) {
+          deadEndpoints.add(subRecord.endpoint);
+        }
+      }
+    })
+  );
+
+  if (deadEndpoints.size > 0) {
+    pushSubscriptionsList = pushSubscriptionsList.filter(
+      (s) => s && !deadEndpoints.has(s.endpoint)
+    );
+    savePushSubscriptionsStore();
+  }
+
+  return { attempted: targets.length, delivered, failed };
+}
+
 /* ── Persistent Notifications Store (Broadcast + Personal + Auto Plan Active/Expired) ── */
 const NOTIFICATIONS_PATH = path.join(__dirname, "notifications.json");
 let notificationsList = [];
@@ -1347,6 +1477,9 @@ function pushNotification({
     notificationsList = notificationsList.slice(0, 250);
   }
   saveNotificationsStore();
+  dispatchWebPush(item).catch((err) =>
+    console.warn("dispatchWebPush:", err && err.message)
+  );
   return item;
 }
 
@@ -1993,10 +2126,11 @@ function persistOrderToMongo(row) {
 async function syncPaymentsAndSettingsFromMongo() {
   try {
     if (col.kv_store) {
-      const [settingsDoc, annDoc, notifDoc] = await Promise.all([
+      const [settingsDoc, annDoc, notifDoc, pushDoc] = await Promise.all([
         col.kv_store.findOne({ _id: "admin_settings" }),
         col.kv_store.findOne({ _id: "announcement" }),
         col.kv_store.findOne({ _id: "notifications_v1" }),
+        col.kv_store.findOne({ _id: "push_subs_v1" }),
       ]);
       if (settingsDoc && settingsDoc.value && typeof settingsDoc.value === "object") {
         adminSettings = { ...DEFAULT_ADMIN_SETTINGS, ...settingsDoc.value };
@@ -2012,6 +2146,9 @@ async function syncPaymentsAndSettingsFromMongo() {
       }
       if (notifDoc && Array.isArray(notifDoc.value)) {
         notificationsList = notifDoc.value;
+      }
+      if (pushDoc && Array.isArray(pushDoc.value)) {
+        pushSubscriptionsList = pushDoc.value;
       }
     }
     if (col.payments) {
@@ -3898,8 +4035,8 @@ app.use((req, res, next) => {
   next();
 });
 
-// Allow local standalone Admin Panel (file:// -> Origin: null) on /admin/*, /app-config, /uploads/*, and /upload-image
-app.use(["/admin", "/app-config", "/uploads", "/upload-image"], (req, res, next) => {
+// Allow local standalone Admin Panel (file:// -> Origin: null) on /admin/*, /app-config, /uploads/*, /upload-image, and /push/*
+app.use(["/admin", "/app-config", "/uploads", "/upload-image", "/push"], (req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   res.setHeader(
@@ -3968,7 +4105,8 @@ app.use((req, res, next) => {
     p.startsWith("/v1") ||
     p.startsWith("/admin") ||
     p.startsWith("/app-config") ||
-    p.startsWith("/uploads")
+    p.startsWith("/uploads") ||
+    p.startsWith("/push")
   ) {
     return next();
   }
@@ -6464,6 +6602,106 @@ app.post("/notifications/read", (req, res) => {
   res.json({ success: true, unread_count: 0 });
 });
 
+/* ── Web Push Subscription Routes ── */
+app.get("/push/vapid-public-key", (_req, res) => {
+  res.json({
+    success: true,
+    publicKey: VAPID_PUBLIC_KEY,
+  });
+});
+
+app.post("/push/subscribe", async (req, res) => {
+  try {
+    const b = req.body || {};
+    const sub = b.subscription || b;
+    if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid Web Push subscription object is required.",
+      });
+    }
+
+    let uid = Number(b.user_id) || null;
+    let uname = b.user_name ? String(b.user_name).slice(0, 80) : null;
+
+    // Optional JWT token resolution
+    const h = req.get("Authorization") || "";
+    const m = h.match(/^Bearer\s+(.+)$/i);
+    if (m && JWT_SECRET) {
+      try {
+        const dec = jwt.verify(m[1].trim(), JWT_SECRET);
+        if (dec && dec.id) uid = Number(dec.id);
+        if (dec && dec.name && !uname) uname = String(dec.name).slice(0, 80);
+      } catch (_) {}
+    }
+
+    const endpoint = String(sub.endpoint).trim();
+    const record = {
+      endpoint,
+      keys: {
+        p256dh: String(sub.keys.p256dh),
+        auth: String(sub.keys.auth),
+      },
+      user_id: uid,
+      user_name: uname,
+      updated_at: new Date().toISOString(),
+    };
+
+    const existingIdx = pushSubscriptionsList.findIndex(
+      (item) => item && item.endpoint === endpoint
+    );
+    if (existingIdx >= 0) {
+      pushSubscriptionsList[existingIdx] = {
+        ...pushSubscriptionsList[existingIdx],
+        ...record,
+      };
+    } else {
+      pushSubscriptionsList.unshift(record);
+      if (pushSubscriptionsList.length > 3000) {
+        pushSubscriptionsList = pushSubscriptionsList.slice(0, 3000);
+      }
+    }
+    savePushSubscriptionsStore();
+
+    if (uid && col.users) {
+      await col.users
+        .updateOne(
+          { id: uid },
+          {
+            $set: {
+              push_enabled: 1,
+              push_updated_at: new Date().toISOString(),
+            },
+          }
+        )
+        .catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      subscribed: true,
+      user_id: uid,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.post("/push/unsubscribe", async (req, res) => {
+  try {
+    const endpoint = String((req.body && req.body.endpoint) || "").trim();
+    if (endpoint) {
+      pushSubscriptionsList = pushSubscriptionsList.filter(
+        (s) => s && s.endpoint !== endpoint
+      );
+      savePushSubscriptionsStore();
+    }
+    res.json({ success: true, subscribed: false });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
 /* ── Public App Config (Plans, UPI ID, Auto-Sliding Home Banners) ── */
 app.get("/app-config", (_req, res) => {
   const weeklyObj = {
@@ -6579,6 +6817,7 @@ app.get("/admin/overview", async (_req, res) => {
         total_revenue: totalRevenue,
         total_games: games.length,
         total_banners: banners.length,
+        push_subscribers_count: pushSubscriptionsList.length,
       },
       settings: {
         ...adminSettings,
@@ -6652,6 +6891,7 @@ app.get("/admin/users", async (req, res) => {
         ref_paid_count: Number(u.ref_paid_count) || 0,
         ref_rewards_earned: Number(u.ref_rewards_earned) || 0,
         referred_by: u.referred_by || null,
+        push_enabled: Boolean(u.push_enabled || isUserPushSubscribed(u.id)),
       });
       if (mapped.length >= limit) break;
     }
@@ -7137,8 +7377,13 @@ app.post("/admin/upload-image", async (req, res) => {
 });
 
 app.get("/admin/notifications", (_req, res) => {
+  const uniquePushUsers = new Set(
+    pushSubscriptionsList.map((s) => s && s.user_id).filter(Boolean)
+  );
   res.json({
     success: true,
+    push_subscribers_count: pushSubscriptionsList.length,
+    push_users_count: uniquePushUsers.size,
     notifications: notificationsList.slice(0, 100),
     templates: {
       plan_active_title:
