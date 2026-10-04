@@ -53,7 +53,8 @@ const WINGO_HISTORY_URL = (
 ).replace(/\/$/, "");
 const VPS_SECRET = (process.env.VPS_SECRET || process.env.DRAGO_VPS_SECRET || "").trim();
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
+// Shorter bearer-token lifetime limits the impact window if a browser token is stolen.
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "24h";
 const SIGNATURE_MAX_SKEW_MS = Number(process.env.SIGNATURE_MAX_SKEW_MS) || 120000; // 2 min
 
 // Rupayex (server-side only)
@@ -172,15 +173,13 @@ const PLAN_CATALOG = {
   },
 };
 
-// Naya bot = ADMIN bot (payments approve, panel, stats).
-// Purana bot (Render env TELEGRAM_BOT_TOKEN) = GROUP bot (bug reports group me bhejta hai).
-const TELEGRAM_BOT_TOKEN =
-  process.env.TELEGRAM_ADMIN_BOT_TOKEN ||
-  "8949315045:AAFWg_41gExZnrK439e7B_dnvQ_AlCTmPYc";
-const TELEGRAM_GROUP_BOT_TOKEN =
-  process.env.TELEGRAM_GROUP_BOT_TOKEN ||
-  process.env.TELEGRAM_BOT_TOKEN ||
-  TELEGRAM_BOT_TOKEN;
+// Separate, server-only credentials. No token literals or code fallbacks.
+const TELEGRAM_BOT_TOKEN = String(
+  process.env.TELEGRAM_ADMIN_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || ""
+).trim();
+const TELEGRAM_GROUP_BOT_TOKEN = String(
+  process.env.TELEGRAM_GROUP_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || TELEGRAM_BOT_TOKEN
+).trim();
 const TELEGRAM_REPORT_GROUP_ID = String(
   process.env.TELEGRAM_REPORT_GROUP_ID || "-1004386088906"
 );
@@ -191,8 +190,8 @@ const TELEGRAM_ADMIN_CHAT_ID = String(
 const UPI_ID = process.env.UPI_ID || "dragoxkrish@nyes";
 const PAYMENT_TTL_MS = 10 * 60 * 1000; // payment popup/resume 10 min; orders history hamesha rahti hai
 
-if (!GOOGLE_CLIENT_ID || !JWT_SECRET) {
-  console.error("❌ GOOGLE_CLIENT_ID aur JWT_SECRET set karo (Render env)");
+if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !JWT_SECRET) {
+  console.error("❌ GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET aur JWT_SECRET set karo (Render env)");
   process.exit(1);
 }
 if (!APP_ID || !APP_SECRET || APP_SECRET.length < 32) {
@@ -202,9 +201,6 @@ if (!APP_ID || !APP_SECRET || APP_SECRET.length < 32) {
 if (JWT_SECRET.length < 32) {
   console.error("❌ JWT_SECRET kam se kam 32 characters ka hona chahiye");
   process.exit(1);
-}
-if (!GOOGLE_CLIENT_SECRET) {
-  console.warn("⚠️  GOOGLE_CLIENT_SECRET missing — Google login fail hoga");
 }
 if (!WINGO_PREDICTION_URL) {
   console.warn("⚠️  WINGO_PREDICTION_URL missing — prediction fail hoga");
@@ -1325,12 +1321,8 @@ function getActiveBanners() {
 }
 
 /* ── Web Push Notification Engine (VAPID + MongoDB/Local Store) ── */
-const VAPID_PUBLIC_KEY =
-  process.env.VAPID_PUBLIC_KEY ||
-  "BOigTrhQmM5ZIPrxLgCVHGEM2ZwGNGQtySp_cakApWg8QLxAzsKCrmnWDZdqfMaE-FabnyFWstfsLbp2DL-ekKc";
-const VAPID_PRIVATE_KEY =
-  process.env.VAPID_PRIVATE_KEY ||
-  "Pc_D3kszKNNnGjQq7w3cTBdLGqw_04GngCOORjwEDFw";
+const VAPID_PUBLIC_KEY = String(process.env.VAPID_PUBLIC_KEY || "").trim();
+const VAPID_PRIVATE_KEY = String(process.env.VAPID_PRIVATE_KEY || "").trim();
 
 if (webPush && VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   try {
@@ -1638,7 +1630,7 @@ function saveAnnouncement(a) {
 }
 
 /* ── Built-in Persistent Image Hosting (MongoDB + RAM Cache + ImgBB fallback) ── */
-const IMGBB_API_KEY = process.env.IMGBB_API_KEY || "";
+const IMGBB_API_KEY = String(process.env.IMGBB_API_KEY || process.env.IMGBB_KEY || "").trim();
 const uploadedImagesMem = new Map(); // id -> { mime, buf, ext }
 
 async function storeUploadedImage(buf, mimeType, req) {
@@ -1651,8 +1643,8 @@ async function storeUploadedImage(buf, mimeType, req) {
         ? "gif"
         : "jpg";
 
-  // Try custom IMGBB_API_KEY only if explicitly set in env and not the old forbidden key
-  if (IMGBB_API_KEY && IMGBB_API_KEY !== "6142948bcadb2c67ba10e4f77fd96a72") {
+  // ImgBB credentials are accepted only from server-side environment variables.
+  if (IMGBB_API_KEY) {
     try {
       const body = new URLSearchParams();
       body.append("key", IMGBB_API_KEY);
@@ -1920,7 +1912,7 @@ async function recordApiUsage(userId, apiKeyId, endpoint) {
 }
 
 /**
- * Validate X-API-Key / ?api_key=, rate-limit, free/pro quotas, touch + usage.
+ * Validate X-API-Key header, rate-limit, free/pro quotas, touch + usage.
  * Returns { row, rate, isPro } or sends error response and returns null.
  *
  * Free users:
@@ -1930,13 +1922,21 @@ async function recordApiUsage(userId, apiKeyId, endpoint) {
  *   - 20 requests / minute / endpoint (unchanged)
  */
 async function requireApiKey(req, res, endpointName) {
-  const key = String(
-    req.headers["x-api-key"] || req.query.api_key || ""
-  ).trim();
-  if (!key || key.length < 16) {
+  // Query-string credentials are rejected: URLs can leak through history, logs, and referrers.
+  if (Object.keys(req.query || {}).some((name) => name.toLowerCase().replace(/[-_]/g, "") === "apikey")) {
+    res.status(400).json({
+      success: false,
+      message: "API keys are accepted only in the X-API-Key header (never in URLs).",
+    });
+    return null;
+  }
+  const authHeader = String(req.headers.authorization || "").trim();
+  const bearerKey = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7).trim() : "";
+  const key = String(req.headers["x-api-key"] || bearerKey || "").trim();
+  if (!key || key.length < 16 || key.length > 256) {
     res.status(401).json({
       success: false,
-      message: "API key required (header X-API-Key or ?api_key=)",
+      message: "API key required in the X-API-Key header.",
     });
     return null;
   }
@@ -4064,6 +4064,8 @@ app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
   res.setHeader(
     "Strict-Transport-Security",
     "max-age=63072000; includeSubDomains; preload"
@@ -5611,7 +5613,6 @@ app.post("/api-keys", async (req, res) => {
       rate_limit: { per_minute: API_RATE_LIMIT },
       usage: {
         header: "X-API-Key: " + apiKey,
-        query: "?api_key=" + apiKey,
       },
       warning: "Copy this key now. It is stored hashed and cannot be shown again.",
     });
@@ -5723,13 +5724,10 @@ app.get("/api-usage", async (req, res) => {
 /**
  * Public history API (API key required)
  * GET /v1/wingo30s/history
- * Auth: header X-API-Key  OR  ?api_key=
+ * Auth: X-API-Key header only; query-string credentials are rejected.
  * Query: limit=1..1000  (newest first; default = all stored, max 1000)
  * Rate: 20 / minute / user
- *
- * Examples:
- *   /v1/wingo30s/history?api_key=...&limit=1   → latest 1 draw
- *   /v1/wingo30s/history?api_key=...&limit=50  → latest 50 draws
+ * Example: GET /v1/wingo30s/history?limit=50 with header X-API-Key: <key>
  */
 app.get("/v1/wingo30s/history", async (req, res) => {
   const auth = await requireApiKey(req, res, "history");
@@ -5769,7 +5767,7 @@ app.get("/v1/wingo30s/history", async (req, res) => {
 /**
  * Public prediction API (API key required)
  * GET /v1/wingo30s/prediction
- * Auth: header X-API-Key  OR  ?api_key=
+ * Auth: X-API-Key header only; query-string credentials are rejected.
  * Rate: 20 / minute / user
  */
 app.get("/v1/wingo30s/prediction", async (req, res) => {
@@ -6355,11 +6353,11 @@ app.post("/payment-appeal", async (req, res) => {
 });
 
 /* ── Telegram free-plan verification bot (registered BEFORE 404 handler) ── */
-const TG_BOT_TOKEN = "8735900669:AAFgHZnkYkxQCW_q1Kbp9uRaGxxvWGeprEs";
-const TG_CHANNEL_ID = "-1002782160527";
-const TG_OWNER_CHAT = "6656009938";
-const TG_CHANNEL_LINK = "https://t.me/+PoqO1JOM5rszNWU9";
-const TG_FREE_SECRET = "DRAGO_FREE_V1_x9k2";
+const TG_BOT_TOKEN = String(process.env.TELEGRAM_FREE_BOT_TOKEN || "").trim();
+const TG_CHANNEL_ID = String(process.env.TG_CHANNEL_ID || "-1002782160527").trim();
+const TG_OWNER_CHAT = String(process.env.TG_OWNER_CHAT || "6656009938").trim();
+const TG_CHANNEL_LINK = String(process.env.TG_JOIN_LINK || "https://t.me/+PoqO1JOM5rszNWU9").trim();
+const TG_FREE_SECRET = String(process.env.TG_FREE_SECRET || "").trim();
 
 function tgCall(method, payload) {
   return fetch("https://api.telegram.org/bot" + TG_BOT_TOKEN + "/" + method, {
@@ -6420,7 +6418,7 @@ app.post("/tg/free-sync", async (req, res) => {
   }
 });
 
-const TG_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || TG_FREE_SECRET;
+const TG_WEBHOOK_SECRET = String(process.env.TELEGRAM_WEBHOOK_SECRET || "").trim();
 
 app.post("/tg/webhook", async (req, res) => {
   // BE-2: Require valid Telegram webhook secret token header
@@ -6809,7 +6807,23 @@ app.get("/app-config", (_req, res) => {
    ADMIN PANEL API (/admin/*) — Protected by X-Admin-Key
    Works from standalone local index.html on mobile (Origin: null supported)
    ═══════════════════════════════════════════════════════════════════════════ */
-const ADMIN_PANEL_KEY = (process.env.ADMIN_PANEL_KEY || "DRAGO-ADMIN-2026").trim();
+const ADMIN_PANEL_KEY = String(process.env.ADMIN_PANEL_KEY || "").trim();
+
+// Fail closed: required secrets must be provisioned out of band.
+const missingSecurityEnv = [];
+if (!TELEGRAM_BOT_TOKEN) missingSecurityEnv.push("TELEGRAM_ADMIN_BOT_TOKEN");
+if (!TG_BOT_TOKEN) missingSecurityEnv.push("TELEGRAM_FREE_BOT_TOKEN");
+if (TG_FREE_SECRET.length < 32) missingSecurityEnv.push("TG_FREE_SECRET (32+ chars)");
+if (TG_WEBHOOK_SECRET.length < 32) missingSecurityEnv.push("TELEGRAM_WEBHOOK_SECRET (32+ chars)");
+if (ADMIN_PANEL_KEY.length < 32) missingSecurityEnv.push("ADMIN_PANEL_KEY (32+ chars)");
+if (!VPS_SECRET || VPS_SECRET.length < 32) missingSecurityEnv.push("VPS_SECRET (32+ chars)");
+if (webPush && (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY)) {
+  missingSecurityEnv.push("VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY");
+}
+if (missingSecurityEnv.length) {
+  console.error("❌ Missing required secure environment variables:", missingSecurityEnv.join(", "));
+  process.exit(1);
+}
 
 function requireAdminKey(req, res, next) {
   const ip = String(req.ip || req.socket?.remoteAddress || "unknown");
@@ -7689,7 +7703,7 @@ async function boot() {
 
     // Prefer long-polling for Approve/Deny reliability on changing tunnels
     if (TELEGRAM_BOT_TOKEN) {
-      console.log(`   Telegram token: set (${TELEGRAM_BOT_TOKEN.slice(0, 8)}...)`);
+      console.log("   Telegram admin bot token: configured");
       console.log(`   Telegram admin chat: ${TELEGRAM_ADMIN_CHAT_ID || "MISSING"}`);
       telegramApi("deleteWebhook", { drop_pending_updates: false })
         .then(async () => {
