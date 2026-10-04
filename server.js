@@ -561,16 +561,85 @@ async function dbUpdateUserProfile(googleId, name, picture) {
   );
 }
 async function dbSetUserPro(userId, isPro, planKey, expires) {
+  const uid = Number(userId);
+  let prevUser = null;
+  try {
+    if (col.users) prevUser = await col.users.findOne({ id: uid });
+  } catch (_) {}
+
   await col.users.updateOne(
-    { id: Number(userId) },
+    { id: uid },
     {
       $set: {
         is_pro: isPro ? 1 : 0,
         pro_plan: planKey || null,
         pro_expires_at: expires || null,
+        ...(isPro ? { pro_expired_notified_for: null } : {}),
       },
     }
   );
+
+  try {
+    const userName = (prevUser && (prevUser.name || prevUser.email)) || "VIP Member";
+    if (isPro) {
+      const pKey = String(planKey || "weekly").toLowerCase();
+      const planLabel =
+        pKey === "monthly" || pKey === "profit"
+          ? "PRO VIP MONTHLY"
+          : "PRO VIP WEEKLY";
+      const daysCount = expires
+        ? Math.max(1, Math.round((new Date(expires).getTime() - Date.now()) / 86400000))
+        : (PLAN_CATALOG[pKey] && PLAN_CATALOG[pKey].days) || 7;
+      const expStr = expires ? formatIstDateShort(expires) : `${daysCount} Days`;
+
+      const title = formatNotifTemplate(
+        (adminSettings && adminSettings.notif_plan_active_title) ||
+          DEFAULT_ADMIN_SETTINGS.notif_plan_active_title,
+        { name: userName, plan: planLabel, days: daysCount, expiry: expStr }
+      );
+      const message = formatNotifTemplate(
+        (adminSettings && adminSettings.notif_plan_active_body) ||
+          DEFAULT_ADMIN_SETTINGS.notif_plan_active_body,
+        { name: userName, plan: planLabel, days: daysCount, expiry: expStr }
+      );
+      pushNotification({
+        target: "user",
+        user_id: uid,
+        user_name: userName,
+        type: "plan_active",
+        title,
+        message,
+        image_url: (adminSettings && adminSettings.notif_plan_active_image) || null,
+        action_url: "/prediction/",
+        action_label: "OPEN PREDICTION →",
+      });
+    } else if (prevUser && prevUser.is_pro) {
+      const expStr = formatIstDateShort(new Date().toISOString());
+      const title = formatNotifTemplate(
+        (adminSettings && adminSettings.notif_plan_expired_title) ||
+          DEFAULT_ADMIN_SETTINGS.notif_plan_expired_title,
+        { name: userName, expiry: expStr }
+      );
+      const message = formatNotifTemplate(
+        (adminSettings && adminSettings.notif_plan_expired_body) ||
+          DEFAULT_ADMIN_SETTINGS.notif_plan_expired_body,
+        { name: userName, expiry: expStr }
+      );
+      pushNotification({
+        target: "user",
+        user_id: uid,
+        user_name: userName,
+        type: "plan_expired",
+        title,
+        message,
+        image_url: (adminSettings && adminSettings.notif_plan_expired_image) || null,
+        action_url: "/payment/?plan=weekly",
+        action_label: "RENEW VIP PLAN →",
+      });
+    }
+  } catch (e) {
+    console.warn("dbSetUserPro notif:", e.message);
+  }
 }
 function isFreeActive(u) {
   return !!(u && u.free_active) && (!u.free_expires_at || Number(u.free_expires_at) > Date.now());
@@ -1053,6 +1122,14 @@ const DEFAULT_ADMIN_SETTINGS = {
   monthly_days: 30,
   monthly_qr_url: "",
   upi_id: "",
+  notif_plan_active_title: "💎 Pro VIP Plan Activated!",
+  notif_plan_active_body:
+    "Congratulations {name}! Your {plan} ({days} Days) VIP subscription is now active until {expiry}. Enjoy Unlimited AI Predictions, NEXUS Agent & Floating Game Window!",
+  notif_plan_active_image: "",
+  notif_plan_expired_title: "⚠️ Your Pro VIP Plan Has Expired!",
+  notif_plan_expired_body:
+    "Hello {name}, your Pro VIP subscription expired on {expiry}. Renew your VIP plan now to continue enjoying unlimited AI predictions and premium features!",
+  notif_plan_expired_image: "",
   banners: [
     {
       id: "default_rx1",
@@ -1075,6 +1152,158 @@ function getActiveBanners() {
     : [];
   if (list.length > 0) return list;
   return DEFAULT_ADMIN_SETTINGS.banners;
+}
+
+/* ── Persistent Notifications Store (Broadcast + Personal + Auto Plan Active/Expired) ── */
+const NOTIFICATIONS_PATH = path.join(__dirname, "notifications.json");
+let notificationsList = [];
+try {
+  if (fs.existsSync(NOTIFICATIONS_PATH)) {
+    const parsed = JSON.parse(fs.readFileSync(NOTIFICATIONS_PATH, "utf8"));
+    if (Array.isArray(parsed)) notificationsList = parsed;
+  }
+} catch (_) {
+  notificationsList = [];
+}
+
+function saveNotificationsStore() {
+  try {
+    fs.writeFileSync(
+      NOTIFICATIONS_PATH,
+      JSON.stringify(notificationsList.slice(0, 250), null, 2),
+      "utf8"
+    );
+  } catch (_) {}
+  if (col.kv_store) {
+    col.kv_store
+      .updateOne(
+        { _id: "notifications_v1" },
+        {
+          $set: {
+            value: notificationsList.slice(0, 250),
+            updated_at: new Date().toISOString(),
+          },
+        },
+        { upsert: true }
+      )
+      .catch((err) => console.warn("mongo notifications save:", err.message));
+  }
+}
+
+function formatNotifTemplate(tpl, vars) {
+  let out = String(tpl || "");
+  const v = vars || {};
+  out = out.replace(/\{name\}/gi, String(v.name || "VIP Member"));
+  out = out.replace(/\{plan\}/gi, String(v.plan || "PRO VIP"));
+  out = out.replace(/\{days\}/gi, String(v.days || "7"));
+  out = out.replace(/\{expiry\}/gi, String(v.expiry || ""));
+  return out;
+}
+
+function formatIstDateShort(isoOrMs) {
+  try {
+    const d = new Date(isoOrMs);
+    if (Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+  } catch (_) {
+    return "—";
+  }
+}
+
+function pushNotification({
+  target,
+  user_id,
+  user_name,
+  type,
+  title,
+  message,
+  image_url,
+  action_url,
+  action_label,
+}) {
+  const item = {
+    id: "ntf_" + Date.now() + "_" + crypto.randomBytes(3).toString("hex"),
+    target: target === "all" ? "all" : "user",
+    user_id: target === "all" ? null : Number(user_id) || null,
+    user_name: user_name ? String(user_name).slice(0, 80) : null,
+    type: String(type || "direct"),
+    title: String(title || "DRAGO Update").trim().slice(0, 140),
+    message: String(message || "").trim().slice(0, 1200),
+    image_url: image_url ? String(image_url).trim() : null,
+    action_url: action_url ? String(action_url).trim() : null,
+    action_label: action_label ? String(action_label).trim().slice(0, 50) : null,
+    created_at: new Date().toISOString(),
+    read_by: [],
+  };
+  notificationsList.unshift(item);
+  if (notificationsList.length > 250) {
+    notificationsList = notificationsList.slice(0, 250);
+  }
+  saveNotificationsStore();
+  return item;
+}
+
+async function sweepExpiredProUsers(onlyUserId) {
+  if (!col.users) return;
+  try {
+    const nowIso = new Date().toISOString();
+    const query = {
+      is_pro: 1,
+      pro_expires_at: { $ne: null, $lte: nowIso },
+    };
+    if (onlyUserId) {
+      query.id = Number(onlyUserId);
+    }
+    const expiredUsers = await col.users.find(query).limit(50).toArray();
+    for (const u of expiredUsers) {
+      if (!u || !u.id) continue;
+      if (u.pro_expired_notified_for && u.pro_expired_notified_for === u.pro_expires_at) {
+        await col.users.updateOne({ id: u.id }, { $set: { is_pro: 0 } });
+        continue;
+      }
+      const upd = await col.users.updateOne(
+        { id: u.id, is_pro: 1 },
+        {
+          $set: {
+            is_pro: 0,
+            pro_expired_notified_for: u.pro_expires_at || nowIso,
+          },
+        }
+      );
+      if (upd && upd.modifiedCount > 0) {
+        const expStr = formatIstDateShort(u.pro_expires_at || nowIso);
+        const title = formatNotifTemplate(
+          adminSettings.notif_plan_expired_title || DEFAULT_ADMIN_SETTINGS.notif_plan_expired_title,
+          { name: u.name || "Member", expiry: expStr }
+        );
+        const message = formatNotifTemplate(
+          adminSettings.notif_plan_expired_body || DEFAULT_ADMIN_SETTINGS.notif_plan_expired_body,
+          { name: u.name || "Member", expiry: expStr }
+        );
+        pushNotification({
+          target: "user",
+          user_id: u.id,
+          user_name: u.name || u.email || "",
+          type: "plan_expired",
+          title,
+          message,
+          image_url: adminSettings.notif_plan_expired_image || null,
+          action_url: "/payment/?plan=weekly",
+          action_label: "RENEW VIP PLAN →",
+        });
+      }
+    }
+  } catch (e) {
+    console.warn("sweepExpiredProUsers:", e.message);
+  }
 }
 
 /* ── Announcement broadcast (new game / feature popup) ── */
@@ -1665,9 +1894,10 @@ function persistOrderToMongo(row) {
 async function syncPaymentsAndSettingsFromMongo() {
   try {
     if (col.kv_store) {
-      const [settingsDoc, annDoc] = await Promise.all([
+      const [settingsDoc, annDoc, notifDoc] = await Promise.all([
         col.kv_store.findOne({ _id: "admin_settings" }),
         col.kv_store.findOne({ _id: "announcement" }),
+        col.kv_store.findOne({ _id: "notifications_v1" }),
       ]);
       if (settingsDoc && settingsDoc.value && typeof settingsDoc.value === "object") {
         adminSettings = { ...DEFAULT_ADMIN_SETTINGS, ...settingsDoc.value };
@@ -1680,6 +1910,9 @@ async function syncPaymentsAndSettingsFromMongo() {
       }
       if (annDoc && annDoc.value !== undefined) {
         announcement = annDoc.value;
+      }
+      if (notifDoc && Array.isArray(notifDoc.value)) {
+        notificationsList = notifDoc.value;
       }
     }
     if (col.payments) {
@@ -5970,6 +6203,65 @@ app.get("/free-check", async (req, res) => {
   }
 });
 
+/* ── User Notifications Feed (Broadcast + Personal + Auto Plan Active/Expired) ── */
+app.get("/notifications", async (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  const uid = Number(decoded.id);
+  try {
+    await sweepExpiredProUsers(uid);
+  } catch (_) {}
+
+  const userNotifs = notificationsList
+    .filter((n) => n && (n.target === "all" || Number(n.user_id) === uid))
+    .slice(0, 60)
+    .map((n) => {
+      const isRead = Array.isArray(n.read_by) && n.read_by.includes(uid);
+      return {
+        id: n.id,
+        target: n.target,
+        type: n.type || "broadcast",
+        title: n.title || "DRAGO Update",
+        message: n.message || "",
+        image_url: n.image_url || null,
+        action_url: n.action_url || null,
+        action_label: n.action_label || null,
+        created_at: n.created_at,
+        is_read: isRead,
+      };
+    });
+
+  const unreadCount = userNotifs.filter((n) => !n.is_read).length;
+  res.json({
+    success: true,
+    unread_count: unreadCount,
+    notifications: userNotifs,
+  });
+});
+
+app.post("/notifications/read", (req, res) => {
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+  const uid = Number(decoded.id);
+  const targetId = String((req.body && req.body.id) || "").trim();
+  let changed = false;
+
+  for (const n of notificationsList) {
+    if (!n) continue;
+    if (n.target !== "all" && Number(n.user_id) !== uid) continue;
+    if (targetId && targetId !== "ALL" && String(n.id) !== targetId) continue;
+    if (!Array.isArray(n.read_by)) n.read_by = [];
+    if (!n.read_by.includes(uid)) {
+      n.read_by.push(uid);
+      if (n.read_by.length > 2000) n.read_by = n.read_by.slice(-2000);
+      changed = true;
+    }
+  }
+
+  if (changed) saveNotificationsStore();
+  res.json({ success: true, unread_count: 0 });
+});
+
 /* ── Public App Config (Plans, UPI ID, Auto-Sliding Home Banners) ── */
 app.get("/app-config", (_req, res) => {
   const weeklyObj = {
@@ -6473,6 +6765,17 @@ app.post("/admin/payment-action", async (req, res) => {
 
     if (action === "reject" || action === "deny") {
       updateOrderStatus(orderId, "REJECTED", order.utr, order.method || "UPI_MANUAL", order.raw_response);
+      try {
+        pushNotification({
+          target: "user",
+          user_id: order.user_id,
+          type: "payment_rejected",
+          title: "❌ Payment Verification Declined",
+          message: `Your payment UTR (${order.utr || "N/A"}) for Order ${orderId} could not be verified. If amount was deducted, open Profile → Subscription Not Approve and upload your payment screenshot.`,
+          action_url: "/profile/",
+          action_label: "UPLOAD PAYMENT PROOF →",
+        });
+      } catch (_) {}
       if (TELEGRAM_BOT_TOKEN && TELEGRAM_ADMIN_CHAT_ID) {
         telegramApi("sendMessage", {
           chat_id: TELEGRAM_ADMIN_CHAT_ID,
@@ -6626,6 +6929,162 @@ app.post("/admin/upload-image", async (req, res) => {
   }
 });
 
+app.get("/admin/notifications", (_req, res) => {
+  res.json({
+    success: true,
+    notifications: notificationsList.slice(0, 100),
+    templates: {
+      plan_active_title:
+        adminSettings.notif_plan_active_title ||
+        DEFAULT_ADMIN_SETTINGS.notif_plan_active_title,
+      plan_active_body:
+        adminSettings.notif_plan_active_body ||
+        DEFAULT_ADMIN_SETTINGS.notif_plan_active_body,
+      plan_active_image: adminSettings.notif_plan_active_image || "",
+      plan_expired_title:
+        adminSettings.notif_plan_expired_title ||
+        DEFAULT_ADMIN_SETTINGS.notif_plan_expired_title,
+      plan_expired_body:
+        adminSettings.notif_plan_expired_body ||
+        DEFAULT_ADMIN_SETTINGS.notif_plan_expired_body,
+      plan_expired_image: adminSettings.notif_plan_expired_image || "",
+    },
+  });
+});
+
+app.post("/admin/notifications/send", async (req, res) => {
+  try {
+    const b = req.body || {};
+    const target = String(b.target || "all").toLowerCase() === "user" ? "user" : "all";
+    const title = String(b.title || "").trim().slice(0, 140);
+    const message = String(b.message || "").trim().slice(0, 1200);
+    const imageUrl = String(b.image_url || "").trim() || null;
+    const actionUrl = String(b.action_url || "").trim() || null;
+    const actionLabel = String(b.action_label || "").trim().slice(0, 50) || null;
+
+    if (!title || !message) {
+      return res.status(400).json({
+        success: false,
+        message: "Both Title and Message are required.",
+      });
+    }
+
+    let resolvedUserId = null;
+    let resolvedUserName = null;
+
+    if (target === "user") {
+      const rawQuery = String(b.user_id || b.user_query || "").trim();
+      if (!rawQuery) {
+        return res.status(400).json({
+          success: false,
+          message: "Enter User ID, Email, or Name for personal notification.",
+        });
+      }
+      let userDoc = null;
+      const numId = Number(rawQuery.replace(/^#/, ""));
+      if (col.users) {
+        if (Number.isFinite(numId) && numId > 0) {
+          userDoc = await col.users.findOne({ id: numId });
+        }
+        if (!userDoc) {
+          const esc = rawQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          userDoc = await col.users.findOne({
+            $or: [
+              { email: { $regex: new RegExp("^" + esc + "$", "i") } },
+              { name: { $regex: new RegExp(esc, "i") } },
+            ],
+          });
+        }
+      }
+      if (!userDoc) {
+        return res.status(404).json({
+          success: false,
+          message: `User "${rawQuery}" not found.`,
+        });
+      }
+      resolvedUserId = userDoc.id;
+      resolvedUserName = userDoc.name || userDoc.email || `User #${userDoc.id}`;
+    }
+
+    const created = pushNotification({
+      target,
+      user_id: resolvedUserId,
+      user_name: resolvedUserName,
+      type: target === "all" ? "broadcast" : "direct",
+      title,
+      message,
+      image_url: imageUrl,
+      action_url: actionUrl,
+      action_label: actionLabel,
+    });
+
+    res.json({
+      success: true,
+      message:
+        target === "all"
+          ? "Broadcast notification sent to ALL users!"
+          : `Notification sent to ${resolvedUserName} (#${resolvedUserId})!`,
+      notification: created,
+      notifications: notificationsList.slice(0, 100),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.post("/admin/notifications/templates", (req, res) => {
+  try {
+    const b = req.body || {};
+    if (typeof b.plan_active_title === "string" && b.plan_active_title.trim()) {
+      adminSettings.notif_plan_active_title = b.plan_active_title.trim().slice(0, 140);
+    }
+    if (typeof b.plan_active_body === "string" && b.plan_active_body.trim()) {
+      adminSettings.notif_plan_active_body = b.plan_active_body.trim().slice(0, 1200);
+    }
+    if (typeof b.plan_active_image === "string") {
+      adminSettings.notif_plan_active_image = b.plan_active_image.trim();
+    }
+    if (typeof b.plan_expired_title === "string" && b.plan_expired_title.trim()) {
+      adminSettings.notif_plan_expired_title = b.plan_expired_title.trim().slice(0, 140);
+    }
+    if (typeof b.plan_expired_body === "string" && b.plan_expired_body.trim()) {
+      adminSettings.notif_plan_expired_body = b.plan_expired_body.trim().slice(0, 1200);
+    }
+    if (typeof b.plan_expired_image === "string") {
+      adminSettings.notif_plan_expired_image = b.plan_expired_image.trim();
+    }
+    saveAdminSettings();
+    res.json({
+      success: true,
+      message: "Auto Plan Active & Plan Expired notification templates saved!",
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.post("/admin/notifications/delete", (req, res) => {
+  try {
+    const id = String((req.body && req.body.id) || "").trim();
+    if (!id) {
+      return res.status(400).json({ success: false, message: "Notification ID required" });
+    }
+    if (id === "ALL") {
+      notificationsList = [];
+    } else {
+      notificationsList = notificationsList.filter((n) => n && String(n.id) !== id);
+    }
+    saveNotificationsStore();
+    res.json({
+      success: true,
+      message: id === "ALL" ? "All notifications cleared!" : "Notification deleted!",
+      notifications: notificationsList.slice(0, 100),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
 // 404
 app.use((_req, res) => {
   res.status(404).json({ success: false, message: "Not found" });
@@ -6666,6 +7125,7 @@ async function boot() {
       syncPaymentsAndSettingsFromMongo()
         .then(() => {
           expireStaleOrders();
+          sweepExpiredProUsers().catch(() => {});
           console.log(`   Payments synced (Mongo + disk): ${getPayments().length} record(s)`);
         })
         .catch((e) => console.warn("mongo payments sync:", e.message));
@@ -6674,14 +7134,15 @@ async function boot() {
       console.error("startup payments:", e.message);
     }
 
-    // Periodic: expire PENDING only (payments.json never auto-deleted)
+    // Periodic: expire PENDING orders + check expired Pro subscriptions
     setInterval(() => {
       try {
         expireStaleOrders();
+        sweepExpiredProUsers().catch(() => {});
       } catch (e) {
         console.error("maintenance:", e.message);
       }
-    }, 5 * 60 * 1000);
+    }, 60 * 1000);
 
     // Prefer long-polling for Approve/Deny reliability on changing tunnels
     if (TELEGRAM_BOT_TOKEN) {
