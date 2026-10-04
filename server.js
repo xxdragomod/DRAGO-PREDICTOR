@@ -852,6 +852,47 @@ async function dbBumpFreeNexus(userId) {
   );
 }
 
+async function notifyUserBanStatus(userId, isBanned, reason) {
+  try {
+    const uid = Number(userId);
+    if (!uid) return;
+    let userName = `User #${uid}`;
+    if (col.users) {
+      const u = await col.users.findOne(
+        { id: uid },
+        { projection: { name: 1, email: 1 } }
+      );
+      if (u && (u.name || u.email)) userName = u.name || u.email;
+    }
+    if (isBanned) {
+      const cleanReason = String(reason || "Security policy").slice(0, 120);
+      pushNotification({
+        target: "user",
+        user_id: uid,
+        user_name: userName,
+        type: "account_banned",
+        title: "🚫 Account Blocked / Restricted",
+        message: `Hi ${userName}, your DRAGO Predictor ID (#${uid}) has been blocked (${cleanReason}). Please contact Admin Support if you need help.`,
+        action_url: "/profile/",
+        action_label: "CONTACT SUPPORT →",
+      });
+    } else {
+      pushNotification({
+        target: "user",
+        user_id: uid,
+        user_name: userName,
+        type: "account_unbanned",
+        title: "✅ Account Unblocked & Restored!",
+        message: `Good news ${userName}! Your DRAGO Predictor ID (#${uid}) has been unblocked by Admin. You can now use all features again.`,
+        action_url: "/dashboard/",
+        action_label: "OPEN APP →",
+      });
+    }
+  } catch (e) {
+    console.warn("notifyUserBanStatus:", e.message);
+  }
+}
+
 async function dbBanUser(userId, reason) {
   const r = await col.users.updateOne(
     { id: Number(userId) },
@@ -863,6 +904,9 @@ async function dbBanUser(userId, reason) {
       },
     }
   );
+  if (r.matchedCount > 0) {
+    notifyUserBanStatus(userId, true, reason);
+  }
   return r.matchedCount > 0;
 }
 /** DevTools detect → temporary block (admin UNLOCK kar sakta hai) */
@@ -891,6 +935,9 @@ async function dbBlockUser(userId, reason, device) {
       },
       { upsert: true }
     );
+  }
+  if (r.matchedCount > 0) {
+    notifyUserBanStatus(userId, true, reason || "Security lock");
   }
   return r.matchedCount > 0;
 }
@@ -932,6 +979,7 @@ async function dbBanPermanent(userId, reason) {
       { $set: { state: "banned" } }
     );
   }
+  notifyUserBanStatus(userId, true, reason || "Admin ban");
   return true;
 }
 async function dbBanUserPermanent(userId, reason) {
@@ -946,6 +994,7 @@ async function dbUnbanUser(userId) {
   if (col.banned_devices) {
     await col.banned_devices.deleteMany({ user_id: Number(userId) });
   }
+  notifyUserBanStatus(userId, false);
   return true;
 }
 async function dbUnlockUser(userId) {
@@ -1054,6 +1103,22 @@ async function dbInsertGame(name, imageUrl, linkUrl, sortOrder) {
     created_at: new Date().toISOString(),
   };
   await col.games.insertOne(doc);
+
+  // Automatically broadcast In-App + Web Push Notification to ALL users when a new game is added!
+  try {
+    pushNotification({
+      target: "all",
+      type: "new_game",
+      title: `🎮 New Game Added: ${name}!`,
+      message: `${name} is now live on DRAGO Predictor! Open the app now to play with real-time AI WinGo 30s predictions.`,
+      image_url: imageUrl || null,
+      action_url: "/game/",
+      action_label: `PLAY ${String(name).toUpperCase().slice(0, 20)} →`,
+    });
+  } catch (e) {
+    console.warn("dbInsertGame pushNotification:", e.message);
+  }
+
   return { lastInsertRowid: id, id };
 }
 async function dbDeleteGame(id) {
@@ -1537,6 +1602,12 @@ async function sweepExpiredProUsers(onlyUserId) {
     console.warn("sweepExpiredProUsers:", e.message);
   }
 }
+
+// Automatically check expired VIP plans every 60 seconds so users receive
+// In-App + Mobile Push Notifications on time even when the app is closed.
+setInterval(() => {
+  sweepExpiredProUsers().catch(() => {});
+}, 60 * 1000);
 
 /* ── Announcement broadcast (new game / feature popup) ── */
 const ANNOUNCE_PATH = path.join(__dirname, "announcement.json");
@@ -6966,6 +7037,16 @@ app.post("/admin/user-action", async (req, res) => {
       if (col.api_usage) {
         await col.api_usage.deleteMany({ user_id: userId });
       }
+      pushNotification({
+        target: "user",
+        user_id: userId,
+        user_name: u.name || u.email || `User #${userId}`,
+        type: "quota_reset",
+        title: "♻️ Free Usage Quota Reset!",
+        message: `Hi ${u.name || "Member"}, your free prediction, API, and NEXUS AI usage quota has been reset to 0 by Admin!`,
+        action_url: "/prediction/",
+        action_label: "OPEN PREDICTION →",
+      });
       return res.json({
         success: true,
         message: `Free quotas reset to 0 for User #${userId}`,
@@ -6978,6 +7059,16 @@ app.post("/admin/user-action", async (req, res) => {
         { id: userId },
         { $set: { free_active: 1, free_expires_at: exp } }
       );
+      pushNotification({
+        target: "user",
+        user_id: userId,
+        user_name: u.name || u.email || `User #${userId}`,
+        type: "free_verified",
+        title: "✅ Free Access Activated!",
+        message: `Hi ${u.name || "Member"}, your account has been verified by Admin! You can now test live predictions.`,
+        action_url: "/prediction/",
+        action_label: "START NOW →",
+      });
       return res.json({
         success: true,
         message: `Free plan manually verified for User #${userId}`,
