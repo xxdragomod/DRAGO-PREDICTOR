@@ -4548,6 +4548,20 @@ app.post("/security/devtools-ban", async (req, res) => {
 
 /** Ban status — frontend early check (device + optional JWT) */
 app.get("/security/ban-status", async (req, res) => {
+  // 🔒 Rate limit (2026-10-05): pehle is endpoint pe koi visible limit nahi thi —
+  // device IDs enumerate/brute-force kiye ja sakte the. Ab per-IP + per-device
+  // dono limits hain. Limit ka jawab fail-open hai (frontend "ok" maan leta hai)
+  // taaki normal users kabhi na atken.
+  const rlIp = String(req.ip || req.socket?.remoteAddress || "unknown");
+  if (!rateLimitUser("ban_stat_ip:" + rlIp, 100, 60000)) {
+    res.setHeader("Retry-After", "30");
+    return res.status(429).json({ success: false, message: "Too many ban checks. Please slow down." });
+  }
+  const rlDev = String(req.query.device || "").slice(0, 64);
+  if (rlDev && !rateLimitUser("ban_stat_dev:" + rlDev, 30, 60000)) {
+    res.setHeader("Retry-After", "30");
+    return res.status(429).json({ success: false, message: "Too many ban checks for this device." });
+  }
   let state = "ok";
   try {
     const device = String(req.query.device || "").slice(0, 64);
