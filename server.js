@@ -4108,14 +4108,30 @@ app.use((req, res, next) => {
   next();
 });
 
-// Allow local standalone Admin Panel (file:// -> Origin: null) on /admin/*, /app-config, /uploads/*, /upload-image, and /push/*
+// Standalone Admin Panel (file:// -> Origin: null / koi origin nahi) aur allow-listed
+// app origins ke liye CORS. ⚠️ 2026-10-05 security fix: pehle yahan blanket
+// `Access-Control-Allow-Origin: *` tha, jisse koi bhi random website (evil.com)
+// /app-config (plans/banners/upi_id) padh sakti thi. Ab sirf:
+//   • no-origin / "null" (file:// admin panel, curl, non-browser clients) → "*"
+//   • allow-listed origins (hamara frontend) → origin echo + Vary: Origin
+//   • baaki sab → koi CORS header nahi (browser request block kar deta hai)
 app.use(["/admin", "/app-config", "/uploads", "/upload-image", "/push"], (req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Admin-Key, x-admin-key, Accept, Origin, X-Timestamp, X-Signature, X-Nonce, X-Client-Domain, X-Shield"
-  );
+  const origin = req.get("origin");
+  let allow = null;
+  if (!origin || origin === "null") {
+    allow = "*";
+  } else if (isCorsOriginAllowed(origin)) {
+    allow = origin;
+    res.setHeader("Vary", "Origin");
+  }
+  if (allow) {
+    res.setHeader("Access-Control-Allow-Origin", allow);
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization, X-Admin-Key, x-admin-key, Accept, Origin, X-Timestamp, X-Signature, X-Nonce, X-Client-Domain, X-Shield"
+    );
+  }
   if (req.method === "OPTIONS") {
     return res.status(204).end();
   }
@@ -4170,6 +4186,16 @@ const allowedOrigins = [
   "http://localhost:5173",
   "http://127.0.0.1:3000",
 ].filter(Boolean);
+
+// Ek hi jagah origin policy (CORS + app-origin gate dono isi ko use karte hain)
+function isCorsOriginAllowed(origin) {
+  try {
+    if (allowedOrigins.includes(origin)) return true;
+    const host = new URL(origin).hostname.toLowerCase();
+    return host === ALLOWED_WEB_DOMAIN || host === "localhost" || host === "127.0.0.1";
+  } catch (_) {}
+  return false;
+}
 
 // Block unknown browser origins on app routes (not /v1, /admin, /app-config, /uploads) — strict allow-list (BE-6)
 app.use((req, res, next) => {
