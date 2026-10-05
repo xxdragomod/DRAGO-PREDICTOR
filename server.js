@@ -6356,7 +6356,7 @@ app.post("/payment-appeal", async (req, res) => {
 const TG_BOT_TOKEN = String(process.env.TELEGRAM_FREE_BOT_TOKEN || "").trim();
 const TG_CHANNEL_ID = String(process.env.TG_CHANNEL_ID || "-1002782160527").trim();
 const TG_OWNER_CHAT = String(process.env.TG_OWNER_CHAT || "6656009938").trim();
-const TG_CHANNEL_LINK = String(process.env.TG_JOIN_LINK || "https://t.me/+PoqO1JOM5rszNWU9").trim();
+const TG_CHANNEL_LINK = String(process.env.TG_JOIN_LINK || "https://t.me/+AWev-BNeAz9jZTQ1").trim();
 const TG_FREE_SECRET = String(process.env.TG_FREE_SECRET || "").trim();
 
 function tgCall(method, payload) {
@@ -6428,6 +6428,21 @@ app.post("/tg/webhook", async (req, res) => {
   }
   res.json({ ok: true });
   try {
+    // Telegram sends this update when a user submits a join request. A pending
+    // request is not membership; acknowledge it but unlock only after approval.
+    const joinRequest = req.body && req.body.chat_join_request;
+    if (
+      joinRequest &&
+      joinRequest.from &&
+      String(joinRequest.chat && joinRequest.chat.id) === String(TG_CHANNEL_ID)
+    ) {
+      await tgCall("sendMessage", {
+        chat_id: joinRequest.from.id,
+        text: "✅ Channel join request mil gaya. Verification admin approval ke baad hi complete hogi. Approval ke baad app/bot me wapas aakar ‘Joined — Verify Now’ dabayein.",
+      });
+      return;
+    }
+
     const cb = req.body && req.body.callback_query;
     if (cb && cb.from && typeof cb.data === "string" && cb.data.startsWith("verify:")) {
       const code = cb.data.slice("verify:".length).trim();
@@ -6497,7 +6512,7 @@ app.post("/tg/webhook", async (req, res) => {
       } else {
         await tgCall("answerCallbackQuery", {
           callback_query_id: cb.id,
-          text: "⚠️ Pehle '1. Join Official Channel' button daba kar channel join karein, phir Verify dabayein!",
+          text: "⚠️ Channel join karein. Join request bheji hai to admin approval ka wait karein; approve hone ke baad Verify Now dobara dabayein.",
           show_alert: true,
         });
       }
@@ -6565,7 +6580,7 @@ app.post("/tg/webhook", async (req, res) => {
     } else {
       await tgCall("sendMessage", {
         chat_id: msg.chat.id,
-        text: "🔐 DRAGO Free Plan Verification\n\nFree plan activate karne ke liye:\n1️⃣ Niche 'Join Official Channel' par tap karke channel join karein.\n2️⃣ Join karne ke baad 'Joined — Verify Now' button dabayein.",
+        text: "🔐 DRAGO Free Plan Verification\n\n1️⃣ Niche 'Join Official Channel' par tap karke channel join karein ya join request bhejein.\n2️⃣ Request pending ho to admin approval ka wait karein. Approval ke baad 'Joined — Verify Now' dabayein; pending request se access activate nahi hota.",
         reply_markup: {
           inline_keyboard: [
             [{ text: "📢 1. Join Official Channel", url: TG_CHANNEL_LINK }],
