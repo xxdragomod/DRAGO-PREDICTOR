@@ -7802,3 +7802,5 @@ boot().catch((e) => {
   console.error("boot failed:", e);
   process.exit(1);
 });
+
+// Deploy refresh: 2026-10-08T03:04:34Z
