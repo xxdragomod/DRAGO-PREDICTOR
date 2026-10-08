@@ -4242,6 +4242,8 @@ app.use(
     allowedHeaders: [
       "Content-Type",
       "Authorization",
+      "X-Free-Token",
+      "x-free-token",
       "X-API-Key",
       "x-api-key",
       "Accept",
@@ -6396,8 +6398,10 @@ app.post("/payment-appeal", async (req, res) => {
 const TG_BOT_TOKEN = String(process.env.TELEGRAM_FREE_BOT_TOKEN || "").trim();
 const TG_CHANNEL_ID = String(process.env.TG_CHANNEL_ID || "-1002782160527").trim();
 const TG_OWNER_CHAT = String(process.env.TG_OWNER_CHAT || "6656009938").trim();
-const TG_CHANNEL_LINK = String(process.env.TG_JOIN_LINK || "https://t.me/+AWev-BNeAz9jZTQ1").trim();
+const TG_CHANNEL_LINK = String(process.env.TG_JOIN_LINK || "").trim();
+const TG_BOT_USERNAME = String(process.env.TG_BOT_USERNAME || "").trim().replace(/^@/, "");
 const TG_FREE_SECRET = String(process.env.TG_FREE_SECRET || "").trim();
+let tgBotUsernameCache = TG_BOT_USERNAME;
 
 function tgCall(method, payload) {
   return fetch("https://api.telegram.org/bot" + TG_BOT_TOKEN + "/" + method, {
@@ -6408,6 +6412,45 @@ function tgCall(method, payload) {
 }
 function tgMemberStatus(joined) {
   return joined && joined.result ? String(joined.result.status) : "";
+}
+async function getTgBotUsername() {
+  if (tgBotUsernameCache) return tgBotUsernameCache;
+  const me = await tgCall("getMe", {});
+  const username = me && me.ok && me.result ? String(me.result.username || "").trim().replace(/^@/, "") : "";
+  if (username) tgBotUsernameCache = username;
+  return username;
+}
+function makeTgStartCode(uid) {
+  const exp36 = Math.floor((Date.now() + 24 * 3600000) / 1000).toString(36);
+  const sig16 = crypto
+    .createHmac("sha256", TG_FREE_SECRET)
+    .update(`v.${uid}.${exp36}`)
+    .digest("hex")
+    .slice(0, 16);
+  return `v_${uid}_${exp36}_${sig16}`;
+}
+function buildTgFreeToken(uid, tgId, exp) {
+  const payload = `${uid}.${tgId}.${exp}`;
+  const sig = crypto.createHmac("sha256", TG_FREE_SECRET).update(payload).digest("hex");
+  return Buffer.from(payload).toString("base64url") + "." + sig;
+}
+function parseTgFreeToken(raw, expectedUid) {
+  try {
+    const parts = String(raw || "").trim().split(".");
+    if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+    const payload = Buffer.from(parts[0], "base64url").toString("utf8");
+    const expected = crypto.createHmac("sha256", TG_FREE_SECRET).update(payload).digest("hex");
+    if (!timingSafeEqualStr(parts[1], expected)) return null;
+    const fields = payload.split(".");
+    const uid = Number(fields[0]);
+    const tgId = Number(fields[1]);
+    const exp = Number(fields[2]);
+    if (!Number.isFinite(uid) || !Number.isFinite(tgId) || !Number.isFinite(exp)) return null;
+    if (String(uid) !== String(expectedUid) || exp <= Date.now()) return null;
+    return { uid, tgId, exp };
+  } catch (_) {
+    return null;
+  }
 }
 function parseTgStartCode(raw) {
   const s = String(raw || "").trim();
@@ -6435,26 +6478,102 @@ function parseTgStartCode(raw) {
   return null;
 }
 
-app.post("/tg/free-sync", async (req, res) => {
+app.get("/free-validate", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.setHeader("Pragma", "no-cache");
+  const decoded = authUser(req, res);
+  if (!decoded) return;
+
+  const uid = Number(decoded.id);
+  const out = {
+    success: true,
+    free_active: 0,
+    is_pro: 0,
+    start_code: "",
+    bot_url: "",
+    free_pred_used: 0,
+    free_pred_limit: 3,
+    free_pred_remaining: 3,
+    api_history_used: 0,
+    api_history_limit: 10,
+    api_history_remaining: 10,
+    free_nexus_used: 0,
+    free_nexus_limit: 3,
+    free_nexus_remaining: 3,
+  };
+
   try {
-    const { uid, tg_id, exp, sig } = req.body || {};
-    if (!uid || !tg_id || !exp || !sig) {
-      return res.status(400).json({ ok: false, reason: "missing_params" });
+    const user = await col.users.findOne({ id: uid });
+    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+
+    const predLimit = Number(user.free_pred_limit) || 3;
+    const predUsed = Number(user.free_pred_used) || 0;
+    const apiLimit = Number(user.api_history_limit) || 10;
+    const apiUsed = Number(user.api_history_used) || 0;
+    const nexusLimit = Number(user.free_nexus_limit) || 3;
+    const nexusUsed = Number(user.free_nexus_used) || 0;
+    Object.assign(out, {
+      free_pred_limit: predLimit,
+      free_pred_used: predUsed,
+      free_pred_remaining: Math.max(0, Number(user.free_pred_remaining != null ? user.free_pred_remaining : predLimit - predUsed)),
+      api_history_limit: apiLimit,
+      api_history_used: apiUsed,
+      api_history_remaining: Math.max(0, Number(user.api_history_remaining != null ? user.api_history_remaining : apiLimit - apiUsed)),
+      free_nexus_limit: nexusLimit,
+      free_nexus_used: nexusUsed,
+      free_nexus_remaining: Math.max(0, Number(user.free_nexus_remaining != null ? user.free_nexus_remaining : nexusLimit - nexusUsed)),
+    });
+
+    const startCode = makeTgStartCode(uid);
+    const botUsername = await getTgBotUsername();
+    out.start_code = startCode;
+    if (botUsername) out.bot_url = `https://t.me/${botUsername}?start=${startCode}`;
+
+    if (user.is_pro === true || user.is_pro === 1 || user.is_pro === "1") {
+      out.is_pro = 1;
+      out.free_active = 1;
+      out.free_pred_remaining = null;
+      out.api_history_remaining = null;
+      out.free_nexus_remaining = null;
+      return res.json(out);
     }
-    const expected = crypto
-      .createHmac("sha256", TG_FREE_SECRET)
-      .update(`${uid}.${tg_id}.${exp}`)
-      .digest("hex");
-    if (String(sig) !== expected) {
-      return res.status(403).json({ ok: false, reason: "invalid_sig" });
+
+    const clientFreeToken = String(req.get("x-free-token") || "").trim();
+    if (clientFreeToken.length > 2048) {
+      return res.status(400).json({ success: false, message: "Invalid request" });
     }
-    const claim = await claimTelegramForUser(Number(uid), Number(tg_id), Number(exp));
-    if (!claim.ok) {
-      return res.status(409).json(claim);
+    const parsedToken = clientFreeToken ? parseTgFreeToken(clientFreeToken, uid) : null;
+    if (clientFreeToken && !parsedToken) out.clear_free_token = true;
+
+    const tgId = Number(user.tg_id || (parsedToken && parsedToken.tgId) || 0);
+    if (tgId > 0) {
+      const joined = await tgCall("getChatMember", { chat_id: TG_CHANNEL_ID, user_id: tgId });
+      const status = tgMemberStatus(joined);
+      if (status === "member" || status === "administrator" || status === "creator") {
+        const exp = Date.now() + 30 * 86400000;
+        const claim = await claimTelegramForUser(uid, tgId, exp);
+        if (!claim.ok) {
+          out.clear_free_token = true;
+          out.tg_already_used = true;
+          out.owner_id = claim.owner_id || null;
+          return res.json(out);
+        }
+        out.free_active = 1;
+        out.free_token = buildTgFreeToken(uid, tgId, exp);
+        return res.json(out);
+      }
+      out.clear_free_token = true;
+      return res.json(out);
     }
-    return res.json({ ok: true, owner_id: claim.owner_id });
+
+    // Preserve historical non-Telegram free accounts, if any, without minting a Telegram token.
+    if (user.free_active === true || user.free_active === 1 || user.free_active === "1") {
+      out.free_active = 1;
+    }
+    return res.json(out);
   } catch (e) {
-    return res.status(500).json({ ok: false, reason: "server_error" });
+    console.error("free-validate:", e.message);
+    return res.status(500).json({ success: false, message: "Verification unavailable" });
   }
 });
 
