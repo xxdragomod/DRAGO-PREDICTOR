@@ -3816,7 +3816,9 @@ function sanitizeReturnTo(u) {
       h === "localhost" ||
       h === "127.0.0.1"
     ) {
-      return origin;
+      // Only the login page path is allowed; anything else falls back to origin.
+      const isLoginPath = parsed.pathname.replace(/\/+$/, "") === "/login";
+      return origin + (isLoginPath ? "/login/" : "");
     }
   } catch (_) {}
   return null;
@@ -4425,7 +4427,7 @@ app.get("/auth/google/callback", async (req, res) => {
   }
   const fail = (reason) => {
     console.error("OAuth fail:", reason);
-    res.redirect(`${FRONTEND_URL}/?error=google_auth_failed`);
+    res.redirect(`${FRONTEND_URL}/login/?error=google_auth_failed`);
   };
 
   try {
@@ -4485,7 +4487,9 @@ app.get("/auth/google/callback", async (req, res) => {
     const token = signToken(user);
 
     // Hash fragment — server logs / referrer mein nahi jata
-    res.redirect(`${st.returnTo || FRONTEND_URL}/#token=${encodeURIComponent(token)}`);
+    const base = st.returnTo || FRONTEND_URL;
+    const target = base.endsWith("/") ? base : `${base}/`;
+    res.redirect(`${target}#token=${encodeURIComponent(token)}`);
   } catch (err) {
     fail(err.message || "unknown");
   }
