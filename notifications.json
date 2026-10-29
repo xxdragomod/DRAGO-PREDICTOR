@@ -1,0 +1,16 @@
+[
+  {
+    "id": "ntf_1793284092210_cda946",
+    "target": "all",
+    "user_id": null,
+    "user_name": null,
+    "type": "new_game",
+    "title": "🎮 New Game Added: Test Game!",
+    "message": "Test Game is now live on DRAGO Predictor! Open the app now to play with real-time AI WinGo 30s predictions.",
+    "image_url": "https://x/y.png",
+    "action_url": "/game/",
+    "action_label": "PLAY TEST GAME →",
+    "created_at": "2026-10-29T14:28:12.210Z",
+    "read_by": []
+  }
+]
