@@ -1,4 +1,4 @@
-const { VAPID_PUBLIC_KEY } = require("../config/env");
+const { BRAND_NAME, VAPID_PUBLIC_KEY } = require("../config/env");
 const express = require("express");
 const router = express.Router();
 

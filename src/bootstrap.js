@@ -1,6 +1,6 @@
 
 const { app } = require("./app");
-const { ALLOWED_WEB_DOMAIN, APP_ID, FRONTEND_URL, PORT, PUBLIC_BASE_URL, TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN, VPS_SECRET, WINGO_HISTORY_URL, WINGO_PREDICTION_URL } = require("./config/env");
+const { ALLOWED_WEB_DOMAIN, APP_ID, BRAND_EMOJI, BRAND_NAME, FRONTEND_URL, PORT, PUBLIC_BASE_URL, TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN, VPS_SECRET, WINGO_HISTORY_URL, WINGO_PREDICTION_URL } = require("./config/env");
 const { flushWrites } = require("./db/store");
 const { importLegacyJsonFiles } = require("./db/legacyJsonImport");
 const { expireStaleOrders } = require("./services/payments");

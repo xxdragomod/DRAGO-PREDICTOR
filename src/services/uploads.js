@@ -58,10 +58,8 @@ async function storeUploadedImage(buf, mimeType, req) {
     }
   }
 
-  const base =
-    PUBLIC_BASE_URL ||
-    (req ? publicBase(req) : "") ||
-    "https://dragopredictor.onrender.com";
+  // PUBLIC_BASE_URL → request se detect → relative path (koi hardcoded domain nahi)
+  const base = PUBLIC_BASE_URL || (req ? publicBase(req) : "");
   return `${base.replace(/\/$/, "")}/uploads/${id}.${ext}`;
 }
 async function getStoredImageById(rawId) {

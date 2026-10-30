@@ -1,3 +1,4 @@
+const { BRAND_NAME } = require("../config/env");
 const crypto = require("crypto");
 const { kvGet, kvSet } = require("../db/store");
 const { dispatchWebPush } = require("./push");

@@ -159,7 +159,11 @@ Circular dependency se bacho: shared state `src/state/` me rakho, helpers `src/u
 
 ## Env Vars
 
-`.env.example` me poora list hai. Critical (missing → server start hi nahi hoga):
+**Har deployment value env se aati hai — code me koi deployment fallback nahi.**
+
+Poora list `.env.example` me hai. Do categories:
+
+### Required (missing → server boot hi nahi hoga)
 
 | Variable | Kyun |
 |---|---|
@@ -167,12 +171,42 @@ Circular dependency se bacho: shared state `src/state/` me rakho, helpers `src/u
 | `JWT_SECRET` (32+) | auth tokens |
 | `APP_ID` + `APP_SECRET` (32+) | client signing |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google login |
+| `FRONTEND_URL` | OAuth redirect, CORS, QR/push URLs |
+| `ALLOWED_WEB_DOMAIN` | browser origin allow-list (FRONTEND_URL se auto-derive) |
+| `WINGO_PREDICTION_URL` / `WINGO_HISTORY_URL` | upstream VPS |
+| `VPS_SECRET` (32+) | VPS auth |
+| `UPI_ID` | manual payment destination |
+| `RUPAYEX_API_BASE` | payment gateway |
+| `TELEGRAM_ADMIN_BOT_TOKEN` | payment approve/deny |
+| `TELEGRAM_ADMIN_CHAT_ID` | **kis chat pe alerts jaayenge** |
+| `TELEGRAM_REPORT_GROUP_ID` | bug reports / ratings |
 | `ADMIN_PANEL_KEY` (32+) | /admin panel |
-| `VPS_SECRET` (32+) | Orihost VPS auth |
-| `TG_FREE_SECRET` (32+) / `TELEGRAM_WEBHOOK_SECRET` (32+) | free-plan bot |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | web push |
+| `SUPPORT_EMAIL` | VAPID contact |
 
----
+### Optional (set na ho to sirf warning)
+
+`TELEGRAM_FREE_BOT_TOKEN`, `TG_CHANNEL_ID`, `TG_OWNER_CHAT`, `TG_JOIN_LINK`,
+`TG_FREE_SECRET`, `TELEGRAM_WEBHOOK_SECRET`, `IMGBB_API_KEY`, `CORS_EXTRA_ORIGINS`,
+`PUBLIC_BASE_URL`.
+
+### Tuning (env se override, default code me)
+
+`PAYMENT_TTL_MS`, `JWT_EXPIRES_IN`, `SIGNATURE_MAX_SKEW_MS`, `NONCE_TTL_MS`,
+`RATE_LIMIT_PER_IP`, `API_RATE_LIMIT`, `API_KEY_LIMIT`, `MARKET_CACHE_TTL_MS`,
+`WINGO_HISTORY_MAX`, `JSON_BODY_LIMIT`, `UPLOAD_MAX_BYTES`, …
+
+### Branding & assets (env se)
+
+`BRAND_NAME`, `BRAND_EMOJI`, `API_STATUS_LABEL`, `SUPPORT_EMAIL`,
+`DEFAULT_BANNER_TITLE`, `DEFAULT_BANNER_IMAGE`, `DEFAULT_BANNER_LINK`,
+`QR_FALLBACK_WEEKLY_URL`, `QR_FALLBACK_MONTHLY_URL`, `QR_REJECT_PATTERN`,
+`PUSH_ICON_PATH`, `PUSH_ICON_VERSION`, `API_KEY_PREFIX`, `ORDER_ID_PREFIX`.
+
+> Nayi env var add karte waqt: `src/config/env.js` me declare karo, exports list me
+> naam add karo, `.env.example` me sample do, aur (required ho to)
+> `src/config/validate.js` me check lagao. `npm run check` batayega agar kahin
+> value use ho rahi hai par import nahi hui.
 
 ## Data Stores — MongoDB only
 

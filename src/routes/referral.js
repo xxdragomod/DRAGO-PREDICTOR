@@ -3,7 +3,7 @@ const router = express.Router();
 
 /** Referral status — code, joined_count, paid_count, rewards_earned, referrals list, link (JWT required) */
 
-const { FRONTEND_URL, TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_BOT_TOKEN, TELEGRAM_REPORT_GROUP_ID } = require("../config/env");
+const { BRAND_NAME, FRONTEND_URL, TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_BOT_TOKEN, TELEGRAM_REPORT_GROUP_ID } = require("../config/env");
 const { PLAN_CATALOG } = require("../config/plans");
 const { bumpReferrer, creditReferrerOnPaidPlan, genRefCode } = require("../db/users");
 const { rateLimitUser } = require("../middleware/rateLimit");

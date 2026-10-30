@@ -1,6 +1,6 @@
 /** Telegram group me notification (group bot → fallback admin bot) */
 
-const { TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_BOT_TOKEN, TELEGRAM_REPORT_GROUP_ID } = require("../config/env");
+const { BRAND_NAME, TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_BOT_TOKEN, TELEGRAM_REPORT_GROUP_ID } = require("../config/env");
 const { PLAN_CATALOG } = require("../config/plans");
 const { escTgMd } = require("../utils/telegramFormat");
 const { telegramApi } = require("./telegramApi");

@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 
 
-const { RUPAYEX_API_BASE, RUPAYEX_API_TOKEN, TELEGRAM_BOT_TOKEN } = require("../config/env");
+const { API_STATUS_LABEL, BRAND_EMOJI, RUPAYEX_API_BASE, RUPAYEX_API_TOKEN, TELEGRAM_BOT_TOKEN } = require("../config/env");
 const { authUser } = require("../services/authService");
 const { pingVps } = require("../services/history");
 const { expireStaleOrders } = require("../services/payments");
@@ -15,7 +15,7 @@ const { getAnnouncement } = require("../services/announcement");
 router.get("/", (_req, res) => {
   res.json({
     success: true,
-    message: "🐉 DRAGO API is running!",
+    message: `${BRAND_EMOJI} ${API_STATUS_LABEL} API is running!`,
     timestamp: new Date().toISOString(),
   });
 });

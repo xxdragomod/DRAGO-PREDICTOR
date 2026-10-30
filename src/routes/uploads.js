@@ -1,3 +1,4 @@
+const { UPLOAD_MAX_BYTES } = require("../config/env");
 const express = require("express");
 const router = express.Router();
 
@@ -29,7 +30,7 @@ router.post("/upload-image", async (req, res) => {
   const m = b64.match(/^data:image\/(png|jpe?g|webp|gif);base64,(.+)$/i);
   if (!m) return res.status(400).json({ success: false, message: "Only PNG/JPG/WEBP/GIF allowed." });
   const buf = Buffer.from(m[2], "base64");
-  if (buf.length > 6 * 1024 * 1024)
+  if (buf.length > UPLOAD_MAX_BYTES)
     return res.status(413).json({ success: false, message: "Image too large (max 6MB)." });
   if (!hasValidImageMagicBytes(buf)) {
     return res.status(400).json({ success: false, message: "Invalid image file contents." });

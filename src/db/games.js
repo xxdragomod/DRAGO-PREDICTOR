@@ -1,3 +1,4 @@
+const { BRAND_NAME } = require("../config/env");
 
 const { pushNotification } = require("../services/notifications");
 const { col } = require("../state/mongo");
@@ -31,7 +32,7 @@ async function dbInsertGame(name, imageUrl, linkUrl, sortOrder) {
       target: "all",
       type: "new_game",
       title: `🎮 New Game Added: ${name}!`,
-      message: `${name} is now live on DRAGO Predictor! Open the app now to play with real-time AI WinGo 30s predictions.`,
+      message: `${name} is now live on ${BRAND_NAME}! Open the app now to play with real-time AI WinGo 30s predictions.`,
       image_url: imageUrl || null,
       action_url: "/game/",
       action_label: `PLAY ${String(name).toUpperCase().slice(0, 20)} →`,

@@ -1,14 +1,24 @@
 const crypto = require("crypto");
 const cors = require("cors");
 const express = require("express");
-const { ALLOWED_WEB_DOMAIN, FRONTEND_URL } = require("./config/env");
+const {
+  ALLOWED_WEB_DOMAIN,
+  CORS_EXTRA_ORIGINS,
+  DEV_ORIGINS,
+  FRONTEND_URL,
+  IS_PRODUCTION,
+  JSON_BODY_LIMIT,
+  JSON_UPLOAD_LIMIT,
+  RATE_LIMIT_PER_IP,
+  RATE_LIMIT_WINDOW_MS,
+} = require("./config/env");
 const { dbIsUserBanned } = require("./db/users");
 const { rateLimitUser } = require("./middleware/rateLimit");
 const { shieldCheck } = require("./middleware/shield");
 const { requireAppSignature } = require("./middleware/signature");
 const { bearerToken, decodeToken } = require("./services/tokens");
 const { col } = require("./state/mongo");
-const { validateSecurityEnv } = require("./config/validate");
+const { validateEnv } = require("./config/validate");
 const { router: systemRoutes } = require("./routes/system");
 const { router: authRoutes } = require("./routes/auth");
 const { router: securityRoutes } = require("./routes/security");
@@ -24,7 +34,7 @@ const { router: notificationRoutes } = require("./routes/notifications");
 const { router: adminRoutes } = require("./routes/admin");
 const { router: uploadRoutes } = require("./routes/uploads");
 // Fail fast: refuse to boot without the required secrets (was inline in server.js).
-validateSecurityEnv();
+validateEnv();
 
 const app = express();
 app.set("trust proxy", 1);
@@ -53,7 +63,7 @@ app.use((req, res, next) => {
 // Global per-IP rate limit (BE-8)
 app.use((req, res, next) => {
   const ip = String(req.ip || req.socket?.remoteAddress || "unknown");
-  if (!rateLimitUser("ip:" + ip, 240, 60000)) {
+  if (!rateLimitUser("ip:" + ip, RATE_LIMIT_PER_IP, RATE_LIMIT_WINDOW_MS)) {
     return res.status(429).json({ success: false, message: "Too many requests. Please slow down." });
   }
   next();
@@ -87,16 +97,21 @@ app.use(["/admin", "/app-config", "/uploads", "/upload-image", "/push"], (req, r
   }
   next();
 });
-app.use("/upload-image", express.json({ limit: "8mb" }));
-app.use("/admin", express.json({ limit: "8mb" }));
-app.use(express.json({ limit: "256kb" }));
-const allowedOrigins = [
-  FRONTEND_URL,
-  "https://dragopredictor.vercel.app",
-  "http://localhost:3000",
-  "http://localhost:5173",
-  "http://127.0.0.1:3000",
-].filter(Boolean);
+app.use("/upload-image", express.json({ limit: JSON_UPLOAD_LIMIT }));
+app.use("/admin", express.json({ limit: JSON_UPLOAD_LIMIT }));
+app.use(express.json({ limit: JSON_BODY_LIMIT }));
+// Saare allowed browser origins env se aate hain (koi hardcoded domain nahi):
+//   FRONTEND_URL + CORS_EXTRA_ORIGINS  → hamesha
+//   DEV_ORIGINS                        → sirf jab NODE_ENV=production na ho
+const allowedOrigins = Array.from(
+  new Set(
+    [
+      FRONTEND_URL,
+      ...CORS_EXTRA_ORIGINS,
+      ...(IS_PRODUCTION ? [] : DEV_ORIGINS),
+    ].filter(Boolean)
+  )
+);
 
 // Ek hi jagah origin policy (CORS + app-origin gate dono isi ko use karte hain)
 function isCorsOriginAllowed(origin) {

@@ -3,13 +3,13 @@ const router = express.Router();
 
 
 const { SERVER_BRAND } = require("../config/constants");
-const { WINGO_PREDICTION_URL } = require("../config/env");
+const { MARKET_CACHE_TTL_MS, WINGO_HISTORY_MAX, WINGO_PREDICTION_URL } = require("../config/env");
 const { dbBumpFreeNexus, dbBumpFreePred, dbFindUserById, dbGetFreeNexusUsed, dbGetFreePredUsed, isFreeActive } = require("../db/users");
 const { rateLimitUser } = require("../middleware/rateLimit");
 const { authUser } = require("../services/authService");
 const { userIsPro } = require("../services/entitlements");
 const { fetchWingoHistoryFromVps } = require("../services/history");
-const { WINGO_HISTORY_MAX, predCache } = require("../services/payments");
+const { predCache } = require("../services/payments");
 const { vpsHeaders } = require("../services/prediction");
 const { freeNexusLimit, freePredLimit } = require("../state/adminSettings");
 router.get("/wingo30s_prediction", async (req, res) => {
@@ -220,7 +220,7 @@ router.all("/nexus-quota", async (req, res) => {
  * 403 milta hai, isliye frontend ka live market chart RENDER se proxy maangta hai.
  * GET /market/wingo30s/history?limit=30   →  { success, items, updated_at }
  * 10-sec in-memory cache se VPS pe load nahi padta (2s poll hone par bhi). */
-const MARKET_CACHE_TTL_MS = 2 * 1000; // chart boundary pe turant fresh
+// Market cache TTL + API key limit env se (config/env.js)
 let marketCache = { at: 0, items: [], updated_at: "" };
 
 router.get("/market/wingo30s/history", async (req, res) => {
@@ -288,6 +288,6 @@ router.get("/market/wingo30s/history", async (req, res) => {
  * GET  /api-keys             — list own keys
  * DELETE /api-keys/:id       — revoke
  */
-const API_KEY_LIMIT = 5;
 
-module.exports = { API_KEY_LIMIT, MARKET_CACHE_TTL_MS, marketCache, router };
+
+module.exports = { marketCache, router };

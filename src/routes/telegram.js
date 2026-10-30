@@ -4,7 +4,7 @@ const router = express.Router();
 
 
 const jwt = require("jsonwebtoken");
-const { FRONTEND_URL, JWT_SECRET } = require("../config/env");
+const { BRAND_NAME, FRONTEND_URL, JWT_SECRET } = require("../config/env");
 const { claimTelegramForUser, isFreeActive } = require("../db/users");
 const { authUser } = require("../services/authService");
 const { col } = require("../state/mongo");

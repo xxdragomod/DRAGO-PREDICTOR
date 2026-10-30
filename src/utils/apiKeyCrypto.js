@@ -1,10 +1,10 @@
 const crypto = require("crypto");
-const { APP_SECRET, APP_SECRET_PREV } = require("../config/env");
+const { API_KEY_PREFIX, APP_SECRET, APP_SECRET_PREV } = require("../config/env");
 function hashApiKey(raw) {
   return crypto.createHash("sha256").update(String(raw || "")).digest("hex");
 }
 function maskApiKeyPrefix(prefix) {
-  const p = String(prefix || "drago_");
+  const p = String(prefix || API_KEY_PREFIX);
   return p + "…" + "****";
 }
 /** Full API key at-rest encryption (AES-256-GCM, APP_SECRET derived) — user can copy key anytime. */
@@ -52,7 +52,7 @@ function mapApiKey(doc) {
   if (!doc) return null;
   const prefix =
     doc.key_prefix ||
-    (doc.api_key ? String(doc.api_key).slice(0, 12) : "drago_");
+    (doc.api_key ? String(doc.api_key).slice(0, 12) : API_KEY_PREFIX);
   return {
     id: doc.id,
     user_id: doc.user_id,

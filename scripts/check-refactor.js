@@ -100,6 +100,42 @@ function dfs(node) {
 }
 for (const f of files) dfs(f);
 
+
+// 4. env value used but never imported (silent `undefined` at runtime)
+const envBody = fs.readFileSync(path.join(SRC, "config", "env.js"), "utf8");
+const envExportMatch = envBody.match(/module\.exports\s*=\s*\{([\s\S]*?)\};/);
+const ENV_NAMES = envExportMatch
+  ? envExportMatch[1].split(",").map((x) => x.trim()).filter(Boolean)
+  : [];
+
+function stripComments(code) {
+  return code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+}
+
+for (const file of files) {
+  const raw = source.get(file);
+  if (path.basename(file) === "env.js") continue;
+  const code = stripComments(raw);
+
+  const imported = new Set();
+  const RX_ANY = /const\s*\{([^}]+)\}\s*=\s*require\("[^"]+"\)/g;
+  let mm;
+  while ((mm = RX_ANY.exec(code))) {
+    for (const part of mm[1].split(",")) imported.add(part.trim().split(":")[0].trim());
+  }
+
+  for (const name of ENV_NAMES) {
+    if (!name) continue;
+    const used = new RegExp("(?<![\\w.$])" + name + "(?![\\w$])").test(code);
+    if (!used || imported.has(name)) continue;
+    const declared = new RegExp("^(?:const|let|var|function|async function)\\s+" + name + "\\b", "m").test(code);
+    if (declared) continue;
+    problems.push(
+      `env value not imported: ${rel(file)} uses ${name} but never requires it (undefined at runtime)`
+    );
+  }
+}
+
 // 3. no disk persistence (legacy importer is the only allowed reader)
 for (const file of files) {
   const body = source.get(file);
@@ -113,4 +149,6 @@ if (problems.length) {
   for (const p of problems) console.error("  • " + p);
   process.exit(1);
 }
-console.log(`✅ checks passed (${files.length} files, 0 broken imports, 0 cycles, 0 disk writes)`);
+console.log(
+  `✅ checks passed (${files.length} files: 0 broken imports, 0 cycles, 0 disk writes, 0 unimported env values)`
+);

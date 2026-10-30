@@ -20,7 +20,7 @@ function isAllowedWebDomain(domain) {
 }
 // Nonce replay protection store (BE-13)
 const usedNonces = new Map(); // nonce -> timestamp
-const NONCE_TTL_MS = 5 * 60 * 1000;
+const NONCE_TTL_MS = require("../config/env").NONCE_TTL_MS;
 function checkAndRecordNonce(nonce) {
   if (!nonce) return true;
   const now = Date.now();

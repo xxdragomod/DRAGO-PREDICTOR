@@ -5,8 +5,7 @@ const { dbBumpFreeApi, dbFindUserById, dbGetFreeApiUsed } = require("../db/users
 const { freeApiHistoryLimit } = require("../state/adminSettings");
 const { todayKey } = require("../utils/time");
 const { userIsPro } = require("./entitlements");
-const API_RATE_LIMIT = 20;
-const API_RATE_WINDOW_MS = 60 * 1000;
+const { API_RATE_LIMIT, API_RATE_WINDOW_MS } = require("../config/env");
 const apiRateBuckets = new Map(); // `${userId}:${endpoint}` → number[] timestamps
 function checkApiRateLimit(userId, endpoint) {
   const k = String(userId) + ":" + endpoint;

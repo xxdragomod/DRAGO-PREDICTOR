@@ -1,5 +1,5 @@
 
-const { TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_BOT_TOKEN, TELEGRAM_REPORT_GROUP_ID } = require("../config/env");
+const { BRAND_EMOJI, BRAND_NAME, TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_BOT_TOKEN, TELEGRAM_REPORT_GROUP_ID } = require("../config/env");
 const { PLAN_CATALOG } = require("../config/plans");
 const { dbDeleteGame, dbFindGame, dbInsertGame, dbListGames, dbMaxGameOrder } = require("../db/games");
 const { banListPayload, dbBanPermanent, dbFindUserById, dbIsUserBanned, dbListBanned, dbSetUserPro, dbUnbanUser } = require("../db/users");

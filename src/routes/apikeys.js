@@ -1,3 +1,4 @@
+const { API_KEY_LIMIT, API_KEY_PREFIX } = require("../config/env");
 const crypto = require("crypto");
 const express = require("express");
 const router = express.Router();
@@ -11,7 +12,6 @@ const { userIsPro } = require("../services/entitlements");
 const { freeApiHistoryLimit } = require("../state/adminSettings");
 const { decKey } = require("../utils/apiKeyCrypto");
 const { todayKey } = require("../utils/time");
-const { API_KEY_LIMIT } = require("./prediction");
 router.post("/api-keys", async (req, res) => {
   const decoded = authUser(req, res);
   if (!decoded) return;
@@ -28,7 +28,7 @@ router.post("/api-keys", async (req, res) => {
     .trim()
     .slice(0, 40) || "default";
   const apiKey =
-    "drago_" + crypto.randomBytes(24).toString("hex");
+    API_KEY_PREFIX + crypto.randomBytes(24).toString("hex");
 
   try {
     const info = await dbInsertApiKey(decoded.id, apiKey, name);

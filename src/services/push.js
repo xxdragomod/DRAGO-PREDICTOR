@@ -1,6 +1,6 @@
 
 const { webPush } = require("../state/webPush");
-const { FRONTEND_URL } = require("../config/env");
+const { BRAND_NAME, FRONTEND_URL, PUSH_ICON_PATH, PUSH_ICON_VERSION, SUPPORT_EMAIL } = require("../config/env");
 const { kvGet, kvSet } = require("../db/store");
 
 const { VAPID_PRIVATE_KEY, VAPID_PUBLIC_KEY } = require("../config/env");
@@ -9,7 +9,7 @@ const { VAPID_PRIVATE_KEY, VAPID_PUBLIC_KEY } = require("../config/env");
 if (webPush && VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   try {
     webPush.setVapidDetails(
-      "mailto:support@dragopredictor.vercel.app",
+      "mailto:" + SUPPORT_EMAIL,
       VAPID_PUBLIC_KEY,
       VAPID_PRIVATE_KEY
     );
@@ -56,11 +56,11 @@ async function dispatchWebPush(item) {
 
   const payload = JSON.stringify({
     id: item.id,
-    title: item.title || "DRAGO Predictor",
+    title: item.title || BRAND_NAME,
     body: item.message || "",
     image: item.image_url || null,
-    icon: `${FRONTEND_URL}/favicon-192.png?v=20261004`,
-    badge: `${FRONTEND_URL}/favicon-192.png?v=20261004`,
+    icon: `${FRONTEND_URL}${PUSH_ICON_PATH}${PUSH_ICON_VERSION ? "?v=" + PUSH_ICON_VERSION : ""}`,
+    badge: `${FRONTEND_URL}${PUSH_ICON_PATH}${PUSH_ICON_VERSION ? "?v=" + PUSH_ICON_VERSION : ""}`,
     url: item.action_url || "/notifications/",
     action_label: item.action_label || "Open App",
     type: item.type || "broadcast",

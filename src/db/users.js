@@ -1,3 +1,4 @@
+const { BRAND_NAME } = require("../config/env");
 const crypto = require("crypto");
 const { PLAN_CATALOG } = require("../config/plans");
 const { formatNotifTemplate, pushNotification } = require("../services/notifications");
@@ -395,7 +396,7 @@ async function notifyUserBanStatus(userId, isBanned, reason) {
         user_name: userName,
         type: "account_banned",
         title: "🚫 Account Blocked / Restricted",
-        message: `Hi ${userName}, your DRAGO Predictor ID (#${uid}) has been blocked (${cleanReason}). Please contact Admin Support if you need help.`,
+        message: `Hi ${userName}, your ${BRAND_NAME} ID (#${uid}) has been blocked (${cleanReason}). Please contact Admin Support if you need help.`,
         action_url: "/profile/",
         action_label: "CONTACT SUPPORT →",
       });

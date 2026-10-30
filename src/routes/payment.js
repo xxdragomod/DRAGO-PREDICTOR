@@ -3,7 +3,7 @@ const express = require("express");
 const router = express.Router();
 
 
-const { FRONTEND_URL, PAYMENT_TTL_MS, RUPAYEX_API_BASE, RUPAYEX_API_TOKEN, TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN } = require("../config/env");
+const { FRONTEND_URL, ORDER_ID_PREFIX, PAYMENT_TTL_MS, RUPAYEX_API_BASE, RUPAYEX_API_TOKEN, TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN, UPLOAD_MAX_BYTES } = require("../config/env");
 const { PLAN_CATALOG } = require("../config/plans");
 const { dbFindUserById } = require("../db/users");
 const { rateLimitUser } = require("../middleware/rateLimit");
@@ -83,14 +83,14 @@ router.post("/create-payment", async (req, res) => {
     });
   }
 
-  const orderId = `DRAGO${Date.now()}${crypto.randomBytes(3).toString("hex")}`;
+  const orderId = `${ORDER_ID_PREFIX}${Date.now()}${crypto.randomBytes(3).toString("hex")}`;
   const redirectUrl = `${FRONTEND_URL}/subscription?order=${encodeURIComponent(orderId)}`;
 
   const form = new URLSearchParams();
   form.set("amount", String(plan.amount));
   form.set("order_id", orderId);
   form.set("redirect_url", redirectUrl);
-  form.set("remark1", `DRAGO ${plan.name}`);
+  form.set("remark1", `${ORDER_ID_PREFIX} ${plan.name}`);
   form.set("user_token", RUPAYEX_API_TOKEN);
 
   try {

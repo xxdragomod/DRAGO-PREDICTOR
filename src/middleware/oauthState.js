@@ -1,8 +1,8 @@
 
-const { ALLOWED_WEB_DOMAIN, FRONTEND_URL } = require("../config/env");
+const { ALLOWED_WEB_DOMAIN, DEV_ORIGINS, FRONTEND_URL, OAUTH_STATE_TTL_MS } = require("../config/env");
 // Cookie free hosts / cross-proxy pe kabhi fail hoti hai; memory reliable hai.
 const oauthStates = new Map(); // state → { exp, ref }
-const STATE_TTL_MS = 10 * 60 * 1000;
+const STATE_TTL_MS = OAUTH_STATE_TTL_MS;
 
 function sanitizeReturnTo(u) {
   try {
@@ -11,7 +11,7 @@ function sanitizeReturnTo(u) {
     const h = parsed.hostname.toLowerCase();
     if (
       origin === FRONTEND_URL ||
-      origin === "https://dragopredictor.vercel.app" ||
+      DEV_ORIGINS.includes(origin) ||
       h === ALLOWED_WEB_DOMAIN ||
       h === "localhost" ||
       h === "127.0.0.1"

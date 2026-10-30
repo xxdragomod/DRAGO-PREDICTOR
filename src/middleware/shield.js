@@ -1,5 +1,5 @@
 /* ── Shield telemetry (BE-4: non-blocking signal; real auth relies on JWT + server entitlements) ── */
-const SHIELD_SALT = "DRAGO_SHIELD_V2_8kq2";
+const { SHIELD_SALT } = require("../config/env");
 function shieldDjb2(s) {
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;

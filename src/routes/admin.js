@@ -3,7 +3,7 @@ const express = require("express");
 const router = express.Router();
 
 
-const { TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN } = require("../config/env");
+const { TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN, UPLOAD_MAX_BYTES } = require("../config/env");
 const { PLAN_CATALOG } = require("../config/plans");
 const { dbDeleteGame, dbInsertGame, dbListGames, dbMaxGameOrder } = require("../db/games");
 const { dbBanUserPermanent, dbFindUserById, dbSetUserPro, dbUnlockUser, isFreeActive } = require("../db/users");
@@ -666,7 +666,7 @@ router.post("/admin/upload-image", async (req, res) => {
       return res.status(400).json({ success: false, message: "Valid PNG/JPG/WEBP/GIF image required" });
     }
     const buf = Buffer.from(m[2], "base64");
-    if (buf.length > 6 * 1024 * 1024) {
+    if (buf.length > UPLOAD_MAX_BYTES) {
       return res.status(413).json({ success: false, message: "Image too large (max 6MB)" });
     }
     const url = await storeUploadedImage(buf, "image/" + m[1].toLowerCase(), req);

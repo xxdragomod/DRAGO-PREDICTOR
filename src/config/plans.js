@@ -1,12 +1,26 @@
 
+const {
+  PLAN_MONTHLY_AMOUNT,
+  PLAN_MONTHLY_DAYS,
+  PLAN_MONTHLY_NAME,
+  PLAN_WEEKLY_AMOUNT,
+  PLAN_WEEKLY_DAYS,
+  PLAN_WEEKLY_NAME,
+  QR_FALLBACK_MONTHLY_URL,
+  QR_FALLBACK_WEEKLY_URL,
+  QR_REJECT_PATTERN,
+  QR_URL_1498,
+  QR_URL_749,
+} = require("./env");
 const { adminSettings } = require("../state/adminSettings");
 function resolveValidQrUrl(rawUrl, fallbackUrl) {
   const u = String(rawUrl || "").trim();
   if (!u) return fallbackUrl;
   // Reject non-direct ImgBB page URLs (https://ibb.co/...) or expired ImgBB assets
+  const rejectRx = QR_REJECT_PATTERN ? new RegExp(QR_REJECT_PATTERN, "i") : null;
   if (
     /^https?:\/\/(www\.)?ibb\.co\//i.test(u) ||
-    /dc0e2bd33bc2|47c3bf9c834f|spLnbMnw|Ngw5tH5j|ZzZvmHB2|5h7CFYrK|upipe-qr/i.test(u)
+    (rejectRx && rejectRx.test(u))
   ) {
     return fallbackUrl;
   }
@@ -15,51 +29,36 @@ function resolveValidQrUrl(rawUrl, fallbackUrl) {
 const PLAN_CATALOG = {
   weekly: {
     get name() {
-      return (adminSettings && adminSettings.weekly_name) || "PRO VIP WEEKLY";
+      return (adminSettings && adminSettings.weekly_name) || PLAN_WEEKLY_NAME;
     },
     get amount() {
       const v = Number(adminSettings && adminSettings.weekly_amount);
-      return Number.isFinite(v) && v >= 1 ? v : 749;
+      return Number.isFinite(v) && v >= 1 ? v : PLAN_WEEKLY_AMOUNT;
     },
     get days() {
       const v = Number(adminSettings && adminSettings.weekly_days);
-      return Number.isFinite(v) && v >= 1 ? v : 7;
+      return Number.isFinite(v) && v >= 1 ? v : PLAN_WEEKLY_DAYS;
     },
     get qr_url() {
-      const raw =
-        (adminSettings && adminSettings.weekly_qr_url) ||
-        process.env.QR_URL_749 ||
-        process.env.QR_URL_300 ||
-        process.env.QR_URL_500 ||
-        "";
-      return resolveValidQrUrl(
-        raw,
-        "https://dragopredictor.vercel.app/assets/upi/qr-weekly.png"
-      );
+      const raw = (adminSettings && adminSettings.weekly_qr_url) || QR_URL_749 || "";
+      return resolveValidQrUrl(raw, QR_FALLBACK_WEEKLY_URL);
     },
   },
   monthly: {
     get name() {
-      return (adminSettings && adminSettings.monthly_name) || "PRO VIP MONTHLY";
+      return (adminSettings && adminSettings.monthly_name) || PLAN_MONTHLY_NAME;
     },
     get amount() {
       const v = Number(adminSettings && adminSettings.monthly_amount);
-      return Number.isFinite(v) && v >= 1 ? v : 1498;
+      return Number.isFinite(v) && v >= 1 ? v : PLAN_MONTHLY_AMOUNT;
     },
     get days() {
       const v = Number(adminSettings && adminSettings.monthly_days);
-      return Number.isFinite(v) && v >= 1 ? v : 30;
+      return Number.isFinite(v) && v >= 1 ? v : PLAN_MONTHLY_DAYS;
     },
     get qr_url() {
-      const raw =
-        (adminSettings && adminSettings.monthly_qr_url) ||
-        process.env.QR_URL_1498 ||
-        process.env.QR_URL_900 ||
-        "";
-      return resolveValidQrUrl(
-        raw,
-        "https://dragopredictor.vercel.app/assets/upi/qr-monthly.png"
-      );
+      const raw = (adminSettings && adminSettings.monthly_qr_url) || QR_URL_1498 || "";
+      return resolveValidQrUrl(raw, QR_FALLBACK_MONTHLY_URL);
     },
   },
   test: {
