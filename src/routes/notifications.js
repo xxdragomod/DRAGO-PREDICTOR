@@ -1,3 +1,4 @@
+const { VAPID_PUBLIC_KEY } = require("../config/env");
 const express = require("express");
 const router = express.Router();
 
@@ -7,7 +8,7 @@ const { JWT_SECRET } = require("../config/env");
 const { PLAN_CATALOG } = require("../config/plans");
 const { authUser } = require("../services/authService");
 const { notificationsList, saveNotificationsStore } = require("../services/notifications");
-const { VAPID_PUBLIC_KEY, pushSubscriptionsList, savePushSubscriptionsStore } = require("../services/push");
+const { pushSubscriptionsList, savePushSubscriptionsStore } = require("../services/push");
 const { sweepExpiredProUsers } = require("../services/sweep");
 const { freeApiHistoryLimit, freeNexusLimit, freePredLimit, getActiveBanners, getActiveUpiId } = require("../state/adminSettings");
 const { col } = require("../state/mongo");

@@ -5,7 +5,8 @@
   "description": "DRAGO main API on Render — auth, payment, proxy to orihost",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check": "node scripts/check-refactor.js"
   },
   "engines": {
     "node": ">=18"

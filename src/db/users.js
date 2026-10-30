@@ -604,4 +604,4 @@ async function banListPayload() {
   return { text: lines.join("\n"), keyboard };
 }
 
-module.exports = { banListPayload, bumpReferrer, claimTelegramForUser, creditReferrerOnPaidPlan, dbBanPermanent, dbBanStateByDevice, dbBanUser, dbBanUserPermanent, dbBlockDevice, dbBlockUser, dbBumpFreeApi, dbBumpFreeNexus, dbBumpFreePred, dbFindUserByGoogle, dbFindUserById, dbFindUserByIdLite, dbGetFreeApiUsed, dbGetFreeNexusUsed, dbGetFreePredUsed, dbInsertUser, dbIsUserBanned, dbListBanned, dbSetUserFree, dbSetUserPro, dbUnbanUser, dbUnlockUser, dbUpdateUserProfile, genRefCode, notifyUserBanStatus };
+module.exports = { isFreeActive, banListPayload, bumpReferrer, claimTelegramForUser, creditReferrerOnPaidPlan, dbBanPermanent, dbBanStateByDevice, dbBanUser, dbBanUserPermanent, dbBlockDevice, dbBlockUser, dbBumpFreeApi, dbBumpFreeNexus, dbBumpFreePred, dbFindUserByGoogle, dbFindUserById, dbFindUserByIdLite, dbGetFreeApiUsed, dbGetFreeNexusUsed, dbGetFreePredUsed, dbInsertUser, dbIsUserBanned, dbListBanned, dbSetUserFree, dbSetUserPro, dbUnbanUser, dbUnlockUser, dbUpdateUserProfile, genRefCode, notifyUserBanStatus };

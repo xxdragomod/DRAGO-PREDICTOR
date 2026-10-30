@@ -214,3 +214,21 @@ connectMongo()
 > ke root me mile, to boot pe automatically MongoDB me import ho jaate hain
 > (existing Mongo data kabhi overwrite nahi hota) aur file `.migrated`
 > rename ho jaati hai.
+
+---
+
+## Pre-deploy checks
+
+```bash
+npm run check     # node scripts/check-refactor.js
+```
+
+Ye 3 cheezein pakadta hai (refactor ke baad common mistakes):
+
+| Check | Kyun |
+|---|---|
+| **broken imports** | destructured `require` aisa naam maange jo target export hi na kare → runtime pe `undefined` → crash |
+| **circular requires** | cycle me destructured import `undefined` aata hai |
+| **disk writes** | runtime data sirf MongoDB me hona chahiye |
+
+Deploy se pehle `npm run check` chala lo — 60 files, ~1 second.
