@@ -1,9 +1,5 @@
 const { UPI_ID } = require("../config/env");
-const { ROOT_DIR } = require("../config/paths");
-const { col } = require("./mongo");
-const path = require("path");
-const fs = require("fs");
-const ADMIN_SETTINGS_PATH = path.join(ROOT_DIR, "admin-settings.json");
+const { kvGet, kvSet } = require("../db/store");
 const DEFAULT_ADMIN_SETTINGS = {
   google_auth_enabled: true,
   auto_payment_enabled: true, // Rupayex gateway
@@ -62,38 +58,21 @@ function getActiveBanners() {
   if (list.length > 0) return list;
   return DEFAULT_ADMIN_SETTINGS.banners;
 }
-function loadAdminSettings() {
-  try {
-    if (fs.existsSync(ADMIN_SETTINGS_PATH)) {
-      const raw = JSON.parse(fs.readFileSync(ADMIN_SETTINGS_PATH, "utf8"));
-      replaceAdminSettings({ ...DEFAULT_ADMIN_SETTINGS, ...(raw || {}) });
-    }
-  } catch (e) {
-    console.warn("admin-settings load:", e.message);
+/** Load runtime settings from MongoDB (called once at boot, before listen). */
+async function hydrateAdminSettings() {
+  const stored = await kvGet("admin_settings");
+  if (stored && typeof stored === "object") {
+    replaceAdminSettings({ ...DEFAULT_ADMIN_SETTINGS, ...stored });
+  } else {
+    // First boot on a fresh database — seed the defaults.
     replaceAdminSettings({ ...DEFAULT_ADMIN_SETTINGS });
+    await kvSet("admin_settings", { ...adminSettings });
   }
 }
+/** Persist runtime settings to MongoDB. Returns the pending write promise. */
 function saveAdminSettings() {
-  try {
-    fs.writeFileSync(
-      ADMIN_SETTINGS_PATH,
-      JSON.stringify(adminSettings, null, 2),
-      "utf8"
-    );
-  } catch (e) {
-    console.error("admin-settings save:", e.message);
-  }
-  if (col.kv_store) {
-    col.kv_store
-      .updateOne(
-        { _id: "admin_settings" },
-        { $set: { value: adminSettings, updated_at: new Date().toISOString() } },
-        { upsert: true }
-      )
-      .catch((err) => console.warn("mongo admin-settings save:", err.message));
-  }
+  return kvSet("admin_settings", { ...adminSettings });
 }
-loadAdminSettings();
 function freePredLimit() {
   const n = Number(adminSettings.free_pred_limit);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 3;
@@ -107,4 +86,4 @@ function freeNexusLimit() {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 3;
 }
 
-module.exports = { ADMIN_SETTINGS_PATH, DEFAULT_ADMIN_SETTINGS, adminSettings, freeApiHistoryLimit, freeNexusLimit, freePredLimit, getActiveBanners, getActiveUpiId, loadAdminSettings, replaceAdminSettings, saveAdminSettings };
+module.exports = { DEFAULT_ADMIN_SETTINGS, adminSettings, freeApiHistoryLimit, freeNexusLimit, freePredLimit, getActiveBanners, getActiveUpiId, hydrateAdminSettings, replaceAdminSettings, saveAdminSettings };

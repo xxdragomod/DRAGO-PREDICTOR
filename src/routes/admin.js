@@ -11,7 +11,7 @@ const { rateLimitUser } = require("../middleware/rateLimit");
 const { authUser } = require("../services/authService");
 const { activatePro, userIsPro } = require("../services/entitlements");
 const { notificationsList, pushNotification, saveNotificationsStore } = require("../services/notifications");
-const { expireStaleOrders, findOrder, flushPaymentsSync, getPayments, paymentsCache, schedulePaymentsFlush, updateOrderStatus } = require("../services/payments");
+const { deleteOrder, expireStaleOrders, findOrder, getPayments, updateOrderStatus } = require("../services/payments");
 const { isUserPushSubscribed, pushSubscriptionsList } = require("../services/push");
 const { telegramApi } = require("../services/telegramApi");
 const { storeUploadedImage } = require("../services/uploads");
@@ -542,12 +542,7 @@ router.post("/admin/payment-action", async (req, res) => {
     }
 
     if (action === "delete") {
-      paymentsCache = getPayments().filter((o) => o && String(o.order_id) !== orderId);
-      schedulePaymentsFlush();
-      flushPaymentsSync();
-      if (col.payments) {
-        await col.payments.deleteOne({ order_id: orderId }).catch(() => {});
-      }
+      deleteOrder(orderId);
       return res.json({
         success: true,
         message: `Order ${orderId} deleted.`,

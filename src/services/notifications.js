@@ -1,43 +1,24 @@
 const crypto = require("crypto");
-const fs = require("fs");
-const path = require("path");
-const { col } = require("../state/mongo");
+const { kvGet, kvSet } = require("../db/store");
 const { dispatchWebPush } = require("./push");
 
-const { ROOT_DIR } = require("../config/paths");
 /* ── Persistent Notifications Store (Broadcast + Personal + Auto Plan Active/Expired) ── */
-const NOTIFICATIONS_PATH = path.join(ROOT_DIR, "notifications.json");
-let notificationsList = [];
-try {
-  if (fs.existsSync(NOTIFICATIONS_PATH)) {
-    const parsed = JSON.parse(fs.readFileSync(NOTIFICATIONS_PATH, "utf8"));
-    if (Array.isArray(parsed)) notificationsList = parsed;
-  }
-} catch (_) {
-  notificationsList = [];
+const notificationsList = [];
+/** Keep the in-memory list in place (stable reference for importers). */
+function replaceNotifications(rows) {
+  notificationsList.length = 0;
+  if (Array.isArray(rows)) notificationsList.push(...rows);
 }
+
+/** Persist notifications to MongoDB (max 250 kept). */
 function saveNotificationsStore() {
-  try {
-    fs.writeFileSync(
-      NOTIFICATIONS_PATH,
-      JSON.stringify(notificationsList.slice(0, 250), null, 2),
-      "utf8"
-    );
-  } catch (_) {}
-  if (col.kv_store) {
-    col.kv_store
-      .updateOne(
-        { _id: "notifications_v1" },
-        {
-          $set: {
-            value: notificationsList.slice(0, 250),
-            updated_at: new Date().toISOString(),
-          },
-        },
-        { upsert: true }
-      )
-      .catch((err) => console.warn("mongo notifications save:", err.message));
-  }
+  return kvSet("notifications_v1", notificationsList.slice(0, 250));
+}
+
+/** Load notifications from MongoDB (boot). */
+async function hydrateNotifications() {
+  const stored = await kvGet("notifications_v1");
+  if (Array.isArray(stored)) replaceNotifications(stored);
 }
 function formatNotifTemplate(tpl, vars) {
   let out = String(tpl || "");
@@ -84,4 +65,4 @@ function pushNotification({
   return item;
 }
 
-module.exports = { NOTIFICATIONS_PATH, formatNotifTemplate, notificationsList, pushNotification, saveNotificationsStore };
+module.exports = { formatNotifTemplate, hydrateNotifications, notificationsList, pushNotification, replaceNotifications, saveNotificationsStore };

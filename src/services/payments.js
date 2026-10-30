@@ -1,60 +1,86 @@
-
-const fs = require("fs");
-const path = require("path");
+/**
+ * Payments store — MongoDB only.
+ *
+ * `payments` collection me ek document = ek order (order_id unique).
+ * In-memory `paymentsCache` sirf read speed ke liye hai; source of truth MongoDB
+ * hai. Disk pe kuch nahi likha jaata.
+ */
 const { PAYMENT_TTL_MS } = require("../config/env");
-const { DEFAULT_ADMIN_SETTINGS, adminSettings } = require("../state/adminSettings");
+const { trackWrite } = require("../db/store");
 const { col } = require("../state/mongo");
-const { notificationsList } = require("./notifications");
-const { pushSubscriptionsList } = require("./push");
 
-const { ROOT_DIR } = require("../config/paths");
-const { replaceAdminSettings } = require("../state/adminSettings");
-const { setAnnouncement } = require("./announcement");
-const PAYMENTS_JSON_PATH = path.join(ROOT_DIR, "payments.json");
-let paymentsCache = null;
-let paymentsDirty = false;
-let paymentsWriteTimer = null;
-function loadPaymentsFromDisk() {
-  try {
-    if (!fs.existsSync(PAYMENTS_JSON_PATH)) {
-      paymentsCache = [];
-      return paymentsCache;
-    }
-    const raw = fs.readFileSync(PAYMENTS_JSON_PATH, "utf8");
-    const data = JSON.parse(raw || "[]");
-    paymentsCache = Array.isArray(data) ? data : [];
-  } catch (e) {
-    console.error("read payments.json:", e.message);
-    paymentsCache = [];
+/** Stable array reference — modules that import it always see current data. */
+const paymentsCache = [];
+let paymentsHydrated = false;
+
+function replacePayments(rows) {
+  paymentsCache.length = 0;
+  for (const r of rows || []) {
+    if (!r || !r.order_id) continue;
+    const clean = { ...r };
+    delete clean._id;
+    paymentsCache.push(clean);
   }
-  return paymentsCache;
 }
+
+/** All orders currently in memory (hydrated at boot). */
 function getPayments() {
-  if (!paymentsCache) loadPaymentsFromDisk();
   return paymentsCache;
 }
-function flushPaymentsSync() {
-  if (!paymentsCache) return;
-  try {
-    const tmp = PAYMENTS_JSON_PATH + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(paymentsCache, null, 0), "utf8");
-    fs.renameSync(tmp, PAYMENTS_JSON_PATH);
-    paymentsDirty = false;
-  } catch (e) {
-    console.error("write payments.json:", e.message);
-    throw e;
+
+/** Move the order document (without Mongo's _id) to a plain row. */
+function toDoc(row) {
+  const copy = { ...row };
+  delete copy._id;
+  copy.order_id = String(copy.order_id);
+  return copy;
+}
+
+/** Queue an upsert of a single order into MongoDB. */
+function persistOrderToMongo(row) {
+  if (!row || !row.order_id) return Promise.resolve();
+  if (!col.payments) {
+    console.warn("persistOrderToMongo: payments collection not ready");
+    return Promise.resolve();
   }
+  return trackWrite(
+    "payment " + String(row.order_id),
+    col.payments.updateOne(
+      { order_id: String(row.order_id) },
+      { $set: toDoc(row) },
+      { upsert: true }
+    )
+  );
 }
-function schedulePaymentsFlush() {
-  paymentsDirty = true;
-  if (paymentsWriteTimer) return;
-  paymentsWriteTimer = setTimeout(() => {
-    paymentsWriteTimer = null;
-    try {
-      flushPaymentsSync();
-    } catch (_) {}
-  }, 50);
+
+/** Remove an order from memory + MongoDB. */
+function deleteOrder(orderId) {
+  const id = String(orderId || "");
+  if (!id) return null;
+  const before = paymentsCache.length;
+  for (let i = paymentsCache.length - 1; i >= 0; i--) {
+    if (paymentsCache[i] && String(paymentsCache[i].order_id) === id) {
+      paymentsCache.splice(i, 1);
+    }
+  }
+  if (col.payments) {
+    trackWrite("payment delete " + id, col.payments.deleteOne({ order_id: id }));
+  }
+  return before !== paymentsCache.length;
 }
+
+/** Load every order from MongoDB into memory. Called once at boot. */
+async function hydratePayments() {
+  if (!col.payments) return;
+  const rows = await col.payments.find({}).sort({ created_at: 1 }).toArray();
+  replacePayments(rows);
+  paymentsHydrated = true;
+}
+
+function isPaymentsHydrated() {
+  return paymentsHydrated;
+}
+
 function findOrder(orderId) {
   if (!orderId) return null;
   const id = String(orderId);
@@ -103,77 +129,8 @@ function findPendingManual(userId, planKey) {
       )[0] || null
   );
 }
-function persistOrderToMongo(row) {
-  if (!row || !row.order_id || !col.payments) return;
-  const copy = { ...row };
-  delete copy._id;
-  col.payments
-    .updateOne(
-      { order_id: String(row.order_id) },
-      { $set: copy },
-      { upsert: true }
-    )
-    .catch((e) => console.warn("mongo payment upsert:", e.message));
-}
-async function syncPaymentsAndSettingsFromMongo() {
-  try {
-    if (col.kv_store) {
-      const [settingsDoc, annDoc, notifDoc, pushDoc] = await Promise.all([
-        col.kv_store.findOne({ _id: "admin_settings" }),
-        col.kv_store.findOne({ _id: "announcement" }),
-        col.kv_store.findOne({ _id: "notifications_v1" }),
-        col.kv_store.findOne({ _id: "push_subs_v1" }),
-      ]);
-      if (settingsDoc && settingsDoc.value && typeof settingsDoc.value === "object") {
-        replaceAdminSettings({ ...DEFAULT_ADMIN_SETTINGS, ...settingsDoc.value });
-      } else {
-        await col.kv_store.updateOne(
-          { _id: "admin_settings" },
-          { $set: { value: adminSettings, updated_at: new Date().toISOString() } },
-          { upsert: true }
-        );
-      }
-      if (annDoc && annDoc.value !== undefined) {
-        setAnnouncement(annDoc.value);
-      }
-      if (notifDoc && Array.isArray(notifDoc.value)) {
-        notificationsList = notifDoc.value;
-      }
-      if (pushDoc && Array.isArray(pushDoc.value)) {
-        pushSubscriptionsList = pushDoc.value;
-      }
-    }
-    if (col.payments) {
-      const localRows = getPayments();
-      const mongoRows = await col.payments
-        .find({})
-        .sort({ created_at: 1 })
-        .toArray();
-      const mergedMap = new Map();
-      for (const r of localRows) {
-        if (r && r.order_id) mergedMap.set(String(r.order_id), r);
-      }
-      for (const r of mongoRows) {
-        if (r && r.order_id) {
-          const clean = { ...r };
-          delete clean._id;
-          mergedMap.set(String(r.order_id), clean);
-        }
-      }
-      paymentsCache = Array.from(mergedMap.values());
-      // Backfill any local-only orders into MongoDB
-      const mongoIds = new Set(mongoRows.map((x) => String(x.order_id)));
-      for (const r of paymentsCache) {
-        if (r && r.order_id && !mongoIds.has(String(r.order_id))) {
-          persistOrderToMongo(r);
-        }
-      }
-      flushPaymentsSync();
-    }
-  } catch (e) {
-    console.warn("syncPaymentsAndSettingsFromMongo:", e.message);
-  }
-}
+
+/** Create a new order (memory + MongoDB). */
 function insertOrder({
   order_id,
   user_id,
@@ -201,10 +158,8 @@ function insertOrder({
     created_at: now,
     updated_at: now,
   };
-  getPayments().push(row);
+  paymentsCache.push(row);
   persistOrderToMongo(row);
-  schedulePaymentsFlush();
-  flushPaymentsSync();
   return row;
 }
 function updateOrderStatus(orderId, payment_status, utr, method, raw_response) {
@@ -220,16 +175,13 @@ function updateOrderStatus(orderId, payment_status, utr, method, raw_response) {
   }
   row.updated_at = new Date().toISOString();
   persistOrderToMongo(row);
-  schedulePaymentsFlush();
-  flushPaymentsSync();
   return row;
 }
 function expireStaleOrders() {
-  // PENDING older than 10 min → EXPIRED (still kept forever in MongoDB & payments.json)
+  // PENDING older than 10 min → EXPIRED (orders MongoDB me hamesha rehte hain)
   try {
     const cutoff = Date.now() - PAYMENT_TTL_MS;
-    let changed = false;
-    for (const o of getPayments()) {
+    for (const o of paymentsCache) {
       if (!o) continue;
       const st = String(o.payment_status || "").toUpperCase();
       if (st !== "PENDING") continue;
@@ -237,13 +189,9 @@ function expireStaleOrders() {
       if (Number.isFinite(t) && t < cutoff) {
         o.payment_status = "EXPIRED";
         o.updated_at = new Date().toISOString();
+        // Only the rows that actually changed are written back.
         persistOrderToMongo(o);
-        changed = true;
       }
-    }
-    if (changed) {
-      schedulePaymentsFlush();
-      flushPaymentsSync();
     }
   } catch (e) {
     console.error("expire orders:", e.message);
@@ -257,4 +205,4 @@ const WINGO_HISTORY_MAX = 10000;
 // Last good prediction — upstream (VPS) fail ho to stale fallback serve karte
 let predCache = { at: 0, prediction: null, fetched_at: "" };
 
-module.exports = { PAYMENTS_JSON_PATH, WINGO_HISTORY_MAX, expireStaleOrders, findOrder, findOrderByUtr, findPendingManual, flushPaymentsSync, getPayments, insertOrder, listOrdersByUser, loadPaymentsFromDisk, paymentsCache, paymentsDirty, paymentsWriteTimer, persistOrderToMongo, predCache, schedulePaymentsFlush, syncPaymentsAndSettingsFromMongo, updateOrderStatus };
+module.exports = { WINGO_HISTORY_MAX, deleteOrder, expireStaleOrders, findOrder, findOrderByUtr, findPendingManual, getPayments, hydratePayments, insertOrder, isPaymentsHydrated, listOrdersByUser, paymentsCache, paymentsHydrated, persistOrderToMongo, predCache, replacePayments, toDoc, updateOrderStatus };

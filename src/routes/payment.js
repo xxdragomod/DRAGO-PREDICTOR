@@ -9,7 +9,7 @@ const { dbFindUserById } = require("../db/users");
 const { rateLimitUser } = require("../middleware/rateLimit");
 const { authUser } = require("../services/authService");
 const { activatePro } = require("../services/entitlements");
-const { expireStaleOrders, findOrder, findOrderByUtr, findPendingManual, flushPaymentsSync, insertOrder, listOrdersByUser, persistOrderToMongo, schedulePaymentsFlush, updateOrderStatus } = require("../services/payments");
+const { expireStaleOrders, findOrder, findOrderByUtr, findPendingManual, insertOrder, listOrdersByUser, persistOrderToMongo, updateOrderStatus } = require("../services/payments");
 const { telegramApi } = require("../services/telegramApi");
 const { notifyAdminManualPayment } = require("../services/telegramNotify");
 const { bearerToken, decodeToken } = require("../services/tokens");
@@ -716,8 +716,6 @@ router.post("/payment-appeal", async (req, res) => {
       order.payment_status = "PENDING_VERIFY";
     }
     order.updated_at = new Date().toISOString();
-    schedulePaymentsFlush();
-    flushPaymentsSync();
     persistOrderToMongo(order);
   }
 

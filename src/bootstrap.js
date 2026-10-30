@@ -1,7 +1,10 @@
 
 const { app } = require("./app");
 const { ALLOWED_WEB_DOMAIN, APP_ID, FRONTEND_URL, PORT, PUBLIC_BASE_URL, TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN, VPS_SECRET, WINGO_HISTORY_URL, WINGO_PREDICTION_URL } = require("./config/env");
-const { expireStaleOrders, getPayments, loadPaymentsFromDisk, syncPaymentsAndSettingsFromMongo } = require("./services/payments");
+const { flushWrites } = require("./db/store");
+const { importLegacyJsonFiles } = require("./db/legacyJsonImport");
+const { expireStaleOrders } = require("./services/payments");
+const { hydrateStores } = require("./services/hydrate");
 const { sweepExpiredProUsers } = require("./services/sweep");
 const { telegramApi } = require("./services/telegramApi");
 const { pollTelegramUpdates } = require("./services/telegramBot");
@@ -12,6 +15,17 @@ async function boot() {
     await connectMongo();
   } catch (e) {
     console.error("❌ MongoDB connect failed:", e.message);
+    process.exit(1);
+  }
+
+  // MongoDB is the only data store: one-time JSON import (if old files exist),
+  // then hydrate every in-memory cache BEFORE the server starts accepting traffic.
+  try {
+    await importLegacyJsonFiles();
+    const stats = await hydrateStores();
+    console.log(`✅ Stores hydrated from MongoDB (${stats.payments} order(s))`);
+  } catch (e) {
+    console.error("❌ Store hydration failed:", e.message);
     process.exit(1);
   }
 
@@ -27,19 +41,12 @@ async function boot() {
 
     console.log(`   History VPS: ${WINGO_HISTORY_URL}`);
     console.log(`   VPS auth: ${VPS_SECRET ? "enabled" : "MISSING — set VPS_SECRET"}`);
-    console.log(`   Data store: none on Render (proxy → orihost only)`);
+    console.log(`   Data store: MongoDB only (no JSON files)`);
 
-    // Load payments.json + sync with MongoDB + mark stale PENDING → EXPIRED (BE-7)
+    // Mark stale PENDING orders → EXPIRED (BE-7)
     try {
-      loadPaymentsFromDisk();
-      syncPaymentsAndSettingsFromMongo()
-        .then(() => {
-          expireStaleOrders();
-          sweepExpiredProUsers().catch(() => {});
-          console.log(`   Payments synced (Mongo + disk): ${getPayments().length} record(s)`);
-        })
-        .catch((e) => console.warn("mongo payments sync:", e.message));
       expireStaleOrders();
+      sweepExpiredProUsers().catch(() => {});
     } catch (e) {
       console.error("startup payments:", e.message);
     }
@@ -93,6 +100,19 @@ async function boot() {
     } else {
       console.warn("   Telegram: TELEGRAM_BOT_TOKEN not set — payment alerts disabled");
     }
+  });
+}
+
+// Flush queued Mongo writes on shutdown (Render sends SIGTERM on deploy/restart).
+let shuttingDown = false;
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.on(signal, async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      await flushWrites();
+    } catch (_) {}
+    process.exit(0);
   });
 }
 

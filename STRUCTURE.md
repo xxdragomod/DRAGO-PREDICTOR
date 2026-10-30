@@ -39,10 +39,13 @@ src/
 │   ├── users.js           ←   user CRUD, pro/free plans, bans, referral
 │   ├── games.js           ←   games collection
 │   ├── apiKeys.js         ←   api keys + usage aggregates
-│   └── mappers.js         ←   doc → API shape (mapUser, mapGame, isFreeActive)
+│   ├── mappers.js         ←   doc → API shape (mapUser, mapGame, isFreeActive)
+│   ├── store.js           ←   kv_store helpers + write queue (kvGet/kvSet/flushWrites)
+│   └── legacyJsonImport.js ←  one-time migration of old JSON files → MongoDB
 │
 ├── services/              ← business logic (routes se call hota hai)
-│   ├── payments.js        ←   orders store, Mongo sync, expiry
+│   ├── payments.js        ←   orders store (MongoDB `payments` collection)
+│   ├── hydrate.js         ←   boot-time hydration of every store from MongoDB
 │   ├── entitlements.js    ←   userIsPro, activatePro
 │   ├── prediction.js      ←   VPS prediction fetch
 │   ├── history.js         ←   VPS history fetch + health ping
@@ -171,9 +174,43 @@ Circular dependency se bacho: shared state `src/state/` me rakho, helpers `src/u
 
 ---
 
-## Data Stores
+## Data Stores — MongoDB only
 
-| Store | Kahan |
-|---|---|
-| users, games, api_keys, api_usage, payments, kv_store, uploads, support_messages, banned_devices | MongoDB |
-| `payments.json`, `admin-settings.json`, `push_subs.json`, `notifications.json`, `announcement.json` | repo root (Mongo ke saath sync) |
+Koi JSON file nahi likhi jaati. Sab kuch MongoDB me:
+
+| Data | Collection | Shape |
+|---|---|---|
+| users | `users` | ek doc per user |
+| games | `games` | ek doc per game |
+| api keys | `api_keys` | ek doc per key |
+| api usage | `api_usage` | daily aggregates |
+| **payments / orders** | `payments` | ek doc per order (`order_id` unique) |
+| **admin settings** | `kv_store` | `_id: "admin_settings"` → `value` |
+| **announcement** | `kv_store` | `_id: "announcement"` → `value` |
+| **notifications** | `kv_store` | `_id: "notifications_v1"` → array (max 250) |
+| **push subscriptions** | `kv_store` | `_id: "push_subs_v1"` → array (max 3000) |
+| uploaded images | `uploads` | binary + mime |
+| support messages | `support_messages` | thread per user |
+| banned devices | `banned_devices` | device id |
+| counters | `counters` | sequence numbers |
+
+### Boot sequence (order matters)
+
+```
+connectMongo()
+  → importLegacyJsonFiles()   // purani .json files agar mili to Mongo me import + rename *.migrated
+  → hydrateStores()           // admin settings, announcement, notifications, push subs, payments
+  → app.listen()              // ab traffic accept hota hai (cache kabhi khaali nahi)
+```
+
+### Writes
+
+* In-memory cache sirf fast reads ke liye hai — source of truth MongoDB hai.
+* Har write `trackWrite()` se queue hoti hai; process shutdown (SIGTERM) pe
+  `flushWrites()` pending writes ko flush karke exit karta hai.
+
+> **Migration note:** purane `payments.json` / `admin-settings.json` /
+> `announcement.json` / `notifications.json` / `push_subs.json` agar server
+> ke root me mile, to boot pe automatically MongoDB me import ho jaate hain
+> (existing Mongo data kabhi overwrite nahi hota) aur file `.migrated`
+> rename ho jaati hai.

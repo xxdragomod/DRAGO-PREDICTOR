@@ -1,12 +1,9 @@
 
-const fs = require("fs");
-const path = require("path");
 const { webPush } = require("../state/webPush");
 const { FRONTEND_URL } = require("../config/env");
-const { col } = require("../state/mongo");
+const { kvGet, kvSet } = require("../db/store");
 
 const { VAPID_PRIVATE_KEY, VAPID_PUBLIC_KEY } = require("../config/env");
-const { ROOT_DIR } = require("../config/paths");
 /* ── Web Push Notification Engine (VAPID + MongoDB/Local Store) ── */
 
 if (webPush && VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
@@ -21,38 +18,22 @@ if (webPush && VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   }
 }
 
-const PUSH_SUBS_PATH = path.join(ROOT_DIR, "push_subs.json");
-let pushSubscriptionsList = [];
-try {
-  if (fs.existsSync(PUSH_SUBS_PATH)) {
-    const parsed = JSON.parse(fs.readFileSync(PUSH_SUBS_PATH, "utf8"));
-    if (Array.isArray(parsed)) pushSubscriptionsList = parsed;
-  }
-} catch (_) {
-  pushSubscriptionsList = [];
+const pushSubscriptionsList = [];
+/** Keep the in-memory list in place (stable reference for importers). */
+function replacePushSubscriptions(rows) {
+  pushSubscriptionsList.length = 0;
+  if (Array.isArray(rows)) pushSubscriptionsList.push(...rows.slice(0, 3000));
 }
+
+/** Persist push subscriptions to MongoDB (max 3000 kept). */
 function savePushSubscriptionsStore() {
-  try {
-    fs.writeFileSync(
-      PUSH_SUBS_PATH,
-      JSON.stringify(pushSubscriptionsList.slice(0, 3000), null, 2),
-      "utf8"
-    );
-  } catch (_) {}
-  if (col.kv_store) {
-    col.kv_store
-      .updateOne(
-        { _id: "push_subs_v1" },
-        {
-          $set: {
-            value: pushSubscriptionsList.slice(0, 3000),
-            updated_at: new Date().toISOString(),
-          },
-        },
-        { upsert: true }
-      )
-      .catch((err) => console.warn("mongo push_subs save:", err.message));
-  }
+  return kvSet("push_subs_v1", pushSubscriptionsList.slice(0, 3000));
+}
+
+/** Load push subscriptions from MongoDB (boot). */
+async function hydratePushSubscriptions() {
+  const stored = await kvGet("push_subs_v1");
+  if (Array.isArray(stored)) replacePushSubscriptions(stored);
 }
 function isUserPushSubscribed(userId) {
   const uid = Number(userId);
@@ -122,4 +103,4 @@ async function dispatchWebPush(item) {
   return { attempted: targets.length, delivered, failed };
 }
 
-module.exports = { PUSH_SUBS_PATH, dispatchWebPush, isUserPushSubscribed, pushSubscriptionsList, savePushSubscriptionsStore };
+module.exports = { dispatchWebPush, hydratePushSubscriptions, isUserPushSubscribed, pushSubscriptionsList, replacePushSubscriptions, savePushSubscriptionsStore };

@@ -4,3 +4,12 @@ node_modules/
 !.env.example
 *.log
 .DS_Store
+
+# Runtime data lives in MongoDB only. These legacy files are imported once at
+# boot and renamed to *.migrated — never commit them.
+payments.json
+admin-settings.json
+announcement.json
+notifications.json
+push_subs.json
+*.json.migrated
