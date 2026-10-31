@@ -33,7 +33,6 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const JWT_SECRET = process.env.JWT_SECRET;
 const APP_ID = process.env.APP_ID || process.env.DRAGO_APP_ID || "";
 const APP_SECRET = process.env.APP_SECRET || process.env.DRAGO_APP_SECRET || "";
-const APP_ID_PREV = process.env.APP_ID_PREV || "";
 const APP_SECRET_PREV = process.env.APP_SECRET_PREV || "";
 const FRONTEND_URL = (
   process.env.FRONTEND_URL || "https://dragopredictor.vercel.app"
@@ -55,7 +54,6 @@ const VPS_SECRET = (process.env.VPS_SECRET || process.env.DRAGO_VPS_SECRET || ""
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
 // Shorter bearer-token lifetime limits the impact window if a browser token is stolen.
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "24h";
-const SIGNATURE_MAX_SKEW_MS = Number(process.env.SIGNATURE_MAX_SKEW_MS) || 120000; // 2 min
 
 // Rupayex (server-side only)
 const RUPAYEX_API_BASE = (
