@@ -13,7 +13,7 @@ const { expireStaleOrders, getPayments, loadPaymentsFromDisk, syncPaymentsAndSet
 const { TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN } = require("./plans");
 const { pollTelegramUpdates } = require("./telegram/admin-bot");
 const { telegramApi } = require("./telegram/api");
-const { ALLOWED_WEB_DOMAIN, APP_ID, FRONTEND_URL, PORT, PUBLIC_BASE_URL, VPS_SECRET, WINGO_HISTORY_URL, WINGO_PREDICTION_URL } = require("./config");
+const { ALLOWED_WEB_DOMAIN, FRONTEND_URL, PORT, PUBLIC_BASE_URL, VPS_SECRET, WINGO_HISTORY_URL, WINGO_PREDICTION_URL } = require("./config");
 
 // ─── Start ──────────────────────────────────────────────────────────────────
 async function boot() {
@@ -28,7 +28,7 @@ async function boot() {
     console.log(`🚀 DRAGO on :${PORT}`);
     console.log(`   Frontend: ${FRONTEND_URL}`);
     console.log(`   Allowed domain: ${ALLOWED_WEB_DOMAIN}`);
-    console.log(`   App ID: ${APP_ID}`);
+    console.log(`   App ID: configured securely`);
     console.log(`   Prediction VPS: ${WINGO_PREDICTION_URL}`);
     console.log(`   Public base: ${PUBLIC_BASE_URL || "(auto from request)"}`);
     console.log(`   OAuth callback: /auth/google/callback`);

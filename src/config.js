@@ -16,7 +16,8 @@ const PORT = Number(process.env.PORT) || 3000;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const JWT_SECRET = process.env.JWT_SECRET;
-const APP_ID = process.env.APP_ID || process.env.DRAGO_APP_ID || "";
+// Server-only identifier. Do not expose this through PUBLIC_* variables or commit its value.
+const DRAGO_APP_ID = String(process.env.DRAGO_APP_ID || "").trim();
 const APP_SECRET = process.env.APP_SECRET || process.env.DRAGO_APP_SECRET || "";
 const APP_SECRET_PREV = process.env.APP_SECRET_PREV || "";
 const FRONTEND_URL = (
@@ -55,8 +56,8 @@ if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !JWT_SECRET) {
   console.error("❌ GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET aur JWT_SECRET set karo (Render env)");
   process.exit(1);
 }
-if (!APP_ID || !APP_SECRET || APP_SECRET.length < 32) {
-  console.error("❌ APP_ID aur APP_SECRET (min 32 chars) set karo (Render env)");
+if (!/^[a-f0-9]{32}$/i.test(DRAGO_APP_ID) || !APP_SECRET || APP_SECRET.length < 32) {
+  console.error("❌ DRAGO_APP_ID (32 hex chars) aur APP_SECRET (min 32 chars) set karo (Render env)");
   process.exit(1);
 }
 if (JWT_SECRET.length < 32) {
@@ -93,7 +94,7 @@ module.exports = {
   APP_ROOT,
   ADMIN_PANEL_KEY,
   ALLOWED_WEB_DOMAIN,
-  APP_ID,
+  DRAGO_APP_ID,
   APP_SECRET,
   APP_SECRET_PREV,
   FRONTEND_URL,

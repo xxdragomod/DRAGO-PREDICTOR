@@ -7,7 +7,7 @@
 
 const crypto = require("crypto");
 
-const { ALLOWED_WEB_DOMAIN, APP_ID, APP_SECRET } = require("../config");
+const { ALLOWED_WEB_DOMAIN, DRAGO_APP_ID, APP_SECRET } = require("../config");
 
 function timingSafeEqualStr(a, b) {
   try {
@@ -37,7 +37,7 @@ function buildSignPayload({ method, pathOnly, timestamp, nonce, body, userId, us
     bodyHash,
     String(userId || ""),
     String(userName || ""),
-    String(APP_ID),
+    String(DRAGO_APP_ID),
   ].join("\n");
 }
 

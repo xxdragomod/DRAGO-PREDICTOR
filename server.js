@@ -10,7 +10,7 @@
  *   src/telegram/*.js        bot integrations
  *   src/boot.js              startup sequence
  *
- * Env: MONGODB_URI, JWT_SECRET, GOOGLE_*, APP_ID, APP_SECRET,
+ * Env: MONGODB_URI, JWT_SECRET, GOOGLE_*, DRAGO_APP_ID, APP_SECRET,
  *      WINGO_PREDICTION_URL, WINGO_HISTORY_URL, VPS_SECRET,
  *      TELEGRAM_*, FRONTEND_URL, ALLOWED_WEB_DOMAIN
  */
